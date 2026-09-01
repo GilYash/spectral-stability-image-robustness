@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+cache/*.npy
+cache/*.npz
+data/
+figures/*.png
+.ipynb_checkpoints/
+.venv/
+results/
+report/*.aux
+report/*.log
+report/*.bbl
+report/*.blg
+report/*.out
+report/*.pdf
+report/tables/*.tex

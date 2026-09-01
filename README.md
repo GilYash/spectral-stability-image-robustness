@@ -17,6 +17,7 @@ masks. Each view goes through the same frozen classifier, giving the profile
 `S(x) = (p_0, ..., p_K)`. Everything after that — the reliability signals
 `C_k, A_k, S_k`, the fusion weights, every baseline and every ablation — is a
 **pure function of `S(x)`**.
+<<<<<<< HEAD
 
 So the pipeline is split in two:
 
@@ -152,3 +153,5 @@ the method comparisons are paired on the same images, so their error bars are
 much tighter than the raw per-condition accuracies suggest.
 
 Cache, results and figures are gitignored.
+=======
+>>>>>>> 06f831045364f99835ed4cd046b699086456dc97

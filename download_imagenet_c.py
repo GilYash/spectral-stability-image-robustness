@@ -9,7 +9,7 @@ FILES = [
     "blur.tar",
     "weather.tar",
     "digital.tar",
-    "extra.tar",   # optional
+    "extra.tar",
 ]
 
 DATA_DIR = Path("data/imagenet-c")

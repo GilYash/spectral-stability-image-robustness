@@ -83,6 +83,31 @@ To exercise the analysis half without ImageNet or a GPU:
 python make_fake_cache.py && python scripts/04_tune.py --models resnet18
 ```
 
+## Setup
+
+Create a virtual environment and install the project dependencies:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+### macOS SSL certificate issue
+
+On some macOS Python installations, downloading pretrained model weights may
+fail with `CERTIFICATE_VERIFY_FAILED`.
+
+For a Python.org installation, run the certificate installer corresponding to
+your Python version. For example, for Python 3.14:
+
+```bash
+open "/Applications/Python 3.14/Install Certificates.command"
+```
+
+Then retry the model download.
+
 ## Read the go/no-go before building anything else
 
 `03_oracle_gonogo.py` prints, per corruption:

@@ -1,5 +1,10 @@
 import argparse
+import os
 from pathlib import Path
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import matplotlib.pyplot as plt
 import torch

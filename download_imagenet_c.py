@@ -15,6 +15,22 @@ FILES = [
 DATA_DIR = Path("data/imagenet-c")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
+
+def archive_needs_extraction(archive_path):
+    with tarfile.open(archive_path) as tar:
+        files = [member for member in tar.getmembers() if member.isfile()]
+
+    for member in files:
+        parts = Path(member.name).parts
+        if parts and parts[0] == DATA_DIR.name:
+            parts = parts[1:]
+
+        if not parts or not (DATA_DIR.joinpath(*parts)).is_file():
+            return True
+
+    return False
+
+
 for filename in FILES:
     archive_path = DATA_DIR / filename
     url = f"{BASE_URL}/{filename}?download=1"
@@ -25,8 +41,11 @@ for filename in FILES:
     else:
         print(f"{filename} already downloaded.")
 
-    print(f"Extracting {filename}...")
-    with tarfile.open(archive_path) as tar:
-        tar.extractall(DATA_DIR)
+    if archive_needs_extraction(archive_path):
+        print(f"Extracting {filename}...")
+        with tarfile.open(archive_path) as tar:
+            tar.extractall(DATA_DIR)
+    else:
+        print(f"{filename} already extracted.")
 
 print("Done.")

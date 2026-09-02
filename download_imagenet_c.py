@@ -13,6 +13,7 @@ FILES = [
 ]
 
 DATA_DIR = Path("data/imagenet-c")
+ARCHIVE_DIR = DATA_DIR.parent
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -32,7 +33,7 @@ def archive_needs_extraction(archive_path):
 
 
 for filename in FILES:
-    archive_path = DATA_DIR / filename
+    archive_path = ARCHIVE_DIR / filename
     url = f"{BASE_URL}/{filename}?download=1"
 
     if not archive_path.exists():

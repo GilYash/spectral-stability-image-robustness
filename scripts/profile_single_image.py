@@ -7,6 +7,7 @@ import argparse
 import os
 from pathlib import Path
 import sys
+from src.fusion import adaptive_fusion
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
@@ -15,6 +16,7 @@ import matplotlib.pyplot as plt
 import torch
 from torchvision.transforms import functional as TF
 from PIL import Image
+import numpy as np
 
 from src.filters import make_spectral_views, cutoffs_for_energy_ladder
 from src.signals import (
@@ -35,7 +37,7 @@ def main():
     parser.add_argument("--output", default="figures/first_profile.png")
     parser.add_argument(
         "--energies", type=float, nargs="+",
-        default=[0.99, 0.97, 0.95, 0.90, 0.85, 0.8],
+        default=np.arange(0.995, 0.92, -0.0025),
         help="target fraction of energy retained per view (sets the ladder)",
     )
     args = parser.parse_args()
@@ -75,6 +77,21 @@ def main():
     S = local_stability(probs, m=1)
     preds = probs.argmax(dim=-1)
 
+    # Adaptive fusion of all spectral views
+    fused_probs, fusion_weights, reliability_scores = adaptive_fusion(
+        probs,
+        C,
+        A,
+        S,
+        alpha=1.0,
+        beta=1.0,
+        gamma=1.0,
+        tau=0.1,
+    )
+
+    fused_pred = fused_probs.argmax().item()
+    fused_confidence = fused_probs.max().item()
+
     # Determine the true class index and WordNet ID from the image path, if available
     true_idx, wnid = true_index_from_path(args.image)
     if true_idx is not None:
@@ -82,7 +99,7 @@ def main():
     else:
         print("true class: unknown (path is not ImageNet-C style)")
 
-    labels = ["original"] + [f"E={e:.2f}" for e in args.energies]
+    labels = ["original"] + [f"E={e:.4f}" for e in args.energies]
 
     # Visualize all spectral views in a single figure
     views_cpu = views.detach().cpu()
@@ -144,6 +161,43 @@ def main():
 
         print(
             f"{n_correct}/{len(preds)} views are correct"
+        )
+
+    print()
+    print("=" * 60)
+    print("FUSION")
+    print("=" * 60)
+
+    fusion_correct = (
+            true_idx is not None
+            and fused_pred == true_idx
+    )
+
+    print(
+        f"prediction: {fused_pred} = {class_name(fused_pred)}"
+    )
+
+    print(
+        f"confidence: {fused_confidence:.4f}"
+    )
+
+    if true_idx is not None:
+        print(
+            f"correct: {'YES' if fusion_correct else 'NO'}"
+        )
+
+    print()
+    print("View weights:")
+
+    for label, weight, score in zip(
+            labels,
+            fusion_weights.tolist(),
+            reliability_scores.tolist(),
+    ):
+        print(
+            f"{label:>10} "
+            f"weight={weight:.4f} "
+            f"score={score:.4f}"
         )
 
     # Visualize the signals (C_k, A_k, S_k) across the ladder of views

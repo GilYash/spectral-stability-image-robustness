@@ -1,0 +1,21 @@
+# Deep learning
+torch
+torchvision
+timm
+
+# Numerical computing
+numpy
+scipy
+
+# Image processing
+Pillow
+scikit-image
+
+# Metrics / analysis
+scikit-learn
+
+# Plotting
+matplotlib
+
+# Utilities
+tqdm

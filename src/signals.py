@@ -27,6 +27,11 @@ def _kl(a, b, eps=1e-12):
 
 
 def jensen_shannon(p, q):
+    """
+    Jensen-Shannon divergence using base-2 logarithms.
+    For valid probability distributions:
+        JS(p, q) is in [0, 1].
+    """
     # JSD(p, q) = 0.5 KL(p||m) + 0.5 KL(q||m),  m = 0.5(p+q)
     # log2 keeps the result in [0, 1]. p, q are (..., num_classes).
     m = 0.5 * (p + q)

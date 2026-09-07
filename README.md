@@ -17,7 +17,6 @@ masks. Each view goes through the same frozen classifier, giving the profile
 `S(x) = (p_0, ..., p_K)`. Everything after that — the reliability signals
 `C_k, A_k, S_k`, the fusion weights, every baseline and every ablation — is a
 **pure function of `S(x)`**.
-<<<<<<< HEAD
 
 So the pipeline is split in two:
 
@@ -134,8 +133,10 @@ Finding that out in week 1 is cheap; finding it out in week 4 is not.
 - **Identical geometry for both architectures**, so ResNet and DeiT see exactly
   the same corrupted pixels; only the normalisation constants differ.
 - **Signals are z-scored per image before fusion** (`standardize=True`).
-  `C_k ∈ [0,1]` but `A_k, S_k ∈ [-ln2, 0]`, so without it α, β, γ are not
-  comparable and τ is unsettable. This is a design choice — ablate it.
+  `C_k ∈ [0,1]` and, since Jensen–Shannon divergence is computed with `log2`,
+  `A_k, S_k ∈ [-1, 0]`. Without standardization, the scales and distributions
+  of the three signals are still different, so α, β, γ are not directly
+  comparable and τ is harder to interpret. This is a design choice — ablate it.
 - **Tuning is leave-one-corruption-family-out AND on a disjoint image split.**
   Report held-out numbers only.
 
@@ -153,5 +154,3 @@ the method comparisons are paired on the same images, so their error bars are
 much tighter than the raw per-condition accuracies suggest.
 
 Cache, results and figures are gitignored.
-=======
->>>>>>> 06f831045364f99835ed4cd046b699086456dc97

@@ -35,7 +35,7 @@ def main():
     parser.add_argument("--output", default="figures/first_profile.png")
     parser.add_argument(
         "--energies", type=float, nargs="+",
-        default=[0.99, 0.95, 0.90, 0.75, 0.50],
+        default=[0.99, 0.97, 0.95, 0.90, 0.85, 0.8],
         help="target fraction of energy retained per view (sets the ladder)",
     )
     args = parser.parse_args()
@@ -83,15 +83,68 @@ def main():
         print("true class: unknown (path is not ImageNet-C style)")
 
     labels = ["original"] + [f"E={e:.2f}" for e in args.energies]
-    print(f"{'view':>10} {'C_k':>8} {'A_k':>8} {'S_k':>8} {'pred':>6} {'':>2} {'class name'}")
+
+    # Visualize all spectral views in a single figure
+    views_cpu = views.detach().cpu()
+
+    fig_views, axes_views = plt.subplots(
+        2, 3,
+        figsize=(12, 8)
+    )
+
+    axes_views = axes_views.flatten()
+
+    for ax, view, label in zip(
+            axes_views,
+            views_cpu,
+            labels
+    ):
+        ax.imshow(view.permute(1, 2, 0).clamp(0, 1))
+        ax.set_title(label)
+        ax.axis("off")
+
+    plt.tight_layout()
+
+    views_output = Path("figures/first_profile_views.png")
+    views_output.parent.mkdir(parents=True, exist_ok=True)
+
+    plt.savefig(
+        views_output,
+        dpi=150,
+        bbox_inches="tight"
+    )
+
+    plt.close(fig_views)
+
+    print("saved", views_output)
+
+    print(
+        f"{'view':>10} {'C_k':>8} {'A_k':>8} {'S_k':>8} "
+        f"{'pred':>6} {'correct':>8} {'class name'}"
+    )
 
     # Print the computed signals and predictions for each view
     for name, ck, ak, sk, pk in zip(
         labels, C.tolist(), A.tolist(), S.tolist(), preds.tolist()
     ):
-        mark = "OK" if (true_idx is not None and pk == true_idx) else "  "
-        print(f"{name:>10} {ck:>8.4f} {ak:>8.4f} {sk:>8.4f} {pk:>6d} {mark:>2} {class_name(pk)}")
-    print(f"{(preds == preds[0]).sum().item()}/{len(preds)} views match the original's prediction")
+        correct = "YES" if (true_idx is not None and pk == true_idx) else "NO"
+        print(
+            f"{name:>10} {ck:>8.4f} {ak:>8.4f} {sk:>8.4f} "
+            f"{pk:>6d} {correct:>8} {class_name(pk)}"
+        )
+    n_match_original = (preds[1:] == preds[0]).sum().item()
+
+    print(
+        f"{n_match_original}/{len(preds) - 1} filtered views "
+        f"match the original's prediction"
+    )
+
+    if true_idx is not None:
+        n_correct = (preds == true_idx).sum().item()
+
+        print(
+            f"{n_correct}/{len(preds)} views are correct"
+        )
 
     # Visualize the signals (C_k, A_k, S_k) across the ladder of views
     x = range(len(C))

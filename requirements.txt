@@ -19,3 +19,7 @@ matplotlib
 
 # Utilities
 tqdm
+
+# Data fetch
+pyarrow
+huggingface_hub

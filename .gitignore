@@ -1,18 +1,19 @@
 __pycache__/
 *.pyc
-cache/*.npy
-cache/*.npz
-data/
-figures/*.png
+cache/
+cmds.txt
+# ignore the dataset itself, but keep the small files that define/document it
+# (a plain 'data/' can't be overridden by a later '!' rule, so exclude contents)
+data/*
+!data/README.md
+!data/subset_classes.json
 .ipynb_checkpoints/
 .venv/
 results/
-report/*.aux
-report/*.log
-report/*.bbl
-report/*.blg
-report/*.out
-report/*.pdf
-report/tables/*.tex
+report/
 *.tar
 .vscode/
+.conda/
+.idea/
+figures/
+cache_fixed/

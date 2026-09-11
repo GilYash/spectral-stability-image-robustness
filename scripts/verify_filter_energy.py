@@ -1,7 +1,12 @@
-# Check the low-pass ladder retains progressively less energy as the cutoff
-# shrinks. If the spread is tiny, the views barely differ and the method has
-# nothing to work with, so run this before trusting anything downstream.
+"""Check that the low-pass ladder actually spreads the retained energy out.
 
+For a ladder of fixed cutoffs, print the fraction of spectral energy each one
+keeps and confirm it decreases monotonically, and save a plot of the curve next
+to the image's power spectrum. If the spread is tiny the views barely differ
+and the method has nothing to work with.
+
+    python scripts/verify_filter_energy.py --image <path to any image>
+"""
 import argparse
 import os
 from pathlib import Path
@@ -19,7 +24,11 @@ from src.filters import radial_lowpass_mask
 
 
 def energy_retained(image, cutoff):
-    """Compute the fraction of energy retained by a low-pass filter with the given cutoff."""
+    """Fraction of the image's spectral energy kept by a low-pass at `cutoff`.
+
+    A standalone copy of `src.filters.energy_retained` so this diagnostic stays
+    independent of changes there.
+    """
     spectrum = torch.fft.fftshift(torch.fft.fft2(image, dim=(-2, -1)), dim=(-2, -1))
     h, w = image.shape[-2:]
     mask = radial_lowpass_mask(h, w, cutoff, device=image.device, dtype=image.dtype)
@@ -29,6 +38,7 @@ def energy_retained(image, cutoff):
 
 
 def main():
+    """Print the retained-energy ladder for one image and save the diagnostic plot."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--image", required=True)
     parser.add_argument("--output", default="figures/filter_energy.png")

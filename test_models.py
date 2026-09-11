@@ -1,3 +1,9 @@
+"""
+Smoke test: load both classifiers and their transforms, print success.
+Run once after install to check the pretrained weights download and load.
+
+run: python test_models.py
+"""
 import torch
 
 from src.models import load_resnet18, load_deit_tiny

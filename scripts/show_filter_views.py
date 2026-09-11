@@ -1,3 +1,12 @@
+"""Save a figure of one image low-pass filtered at a ladder of fixed cutoffs.
+
+A quick visual check that the filter bank does something sensible before
+trusting anything downstream: the views should get progressively blurrier while
+the original (view 0) is left untouched. Uses hand-picked cutoffs, not the
+energy ladder -- for that, see profile_single_image.py.
+
+    python scripts/show_filter_views.py --image <path to any image>
+"""
 import argparse
 import os
 from pathlib import Path
@@ -15,6 +24,7 @@ from src.filters import make_spectral_views
 
 
 def main():
+    """Load the image, build the view stack, assert view 0 is untouched, save a figure."""
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--image",

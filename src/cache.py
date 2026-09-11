@@ -1,0 +1,312 @@
+"""Profile cache: run each (model, corruption, severity) through the models once
+and store the per-view probability vectors S(x) on disk. Every experiment after
+that is NumPy over these arrays -- see src/analysis.py, src/metrics.py.
+
+Two view families (ladders) are supported, selected by scripts/cache_profiles.py
+--ladder and written to separate cache roots so they never mix:
+    energy  (default) per-image adaptive cutoffs -- see `spectral_views`
+    fixed   the same absolute cutoffs for every image -- see `spectral_views_fixed`
+
+Layout (CACHE_ROOT is set by the caller, e.g. "cache" or "cache_fixed"):
+    <CACHE_ROOT>/<model>/<corruption>/<severity>.npz
+    <CACHE_ROOT>/<model>/clean/0.npz
+
+Each .npz holds:
+    probs     (N, K+1, 1000) float16   softmax outputs, view 0 = unfiltered
+    cutoffs   (N, K)         float32    per-image low-pass cutoffs actually used
+    labels    (N,)           int32      true ImageNet index
+    paths     (N,)           str        source image path
+    energies  (K,)           float32    the energy ladder targets
+"""
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+import numpy as np
+import torch
+from PIL import Image
+from torchvision.transforms import functional as TF
+
+from src.filters import radial_lowpass_mask
+from src.models import load_resnet18, load_deit_tiny
+
+#: where cached conditions are written / read
+CACHE_ROOT = Path("cache")
+
+#: The energy ladder: filtered view k keeps 'ENERGIES[k]' of the image's
+#: spectral energy. K = len(ENERGIES) filtered views, plus the original.
+ENERGIES = (0.99, 0.98, 0.97, 0.96, 0.95, 0.94, 0.93)
+
+#: Alternative ladder: the same absolute cutoff for every image, instead of
+#: solving per image for a target energy fraction. See the "fixed" ladder note
+#: below `compute_condition` for why this exists.
+FIXED_CUTOFFS = (0.9, 0.75, 0.6, 0.45, 0.3, 0.2, 0.12)
+
+#: ImageNet normalisation constants - the same for ResNet-18 and DeiT-Tiny.
+MEAN = (0.485, 0.456, 0.406)
+STD = (0.229, 0.224, 0.225)
+
+#: model name (as used in cache paths and CLI flags) -> loader function
+LOADERS = {"resnet18": load_resnet18, "deit": load_deit_tiny}
+
+
+# --------------------------------------------------------------------------- #
+# image listing
+# --------------------------------------------------------------------------- #
+EXTS = {".jpeg", ".jpg", ".png"}
+
+
+def list_condition_images(corruption, severity, wnid_to_index,
+                          corrupt_root="data/imagenet-c",
+                          clean_root="data/imagenet/val",
+                          n_per_class=None):
+    """List every image of one condition, with its label.
+
+    Deterministic: classes in sorted wnid order, images in sorted filename order
+    within each class, so the ordering is identical for every model.
+
+    Args:
+        corruption: corruption name, or "clean" for the validation images.
+        severity: 1..5 (ignored when corruption == "clean").
+        wnid_to_index: the subset map (wnid -> ImageNet index).
+        corrupt_root, clean_root: dataset roots.
+        n_per_class: keep only the first N images of each class (None = all).
+
+    Returns:
+        (paths, labels): a list of path strings and an int32 array of the same
+        length. Classes with no folder on disk are silently skipped.
+    """
+    if corruption == "clean":
+        base = Path(clean_root)
+        subdirs = {w: base / w for w in wnid_to_index}
+    else:
+        base = Path(corrupt_root) / corruption / str(severity)
+        subdirs = {w: base / w for w in wnid_to_index}
+
+    paths, labels = [], []
+    for wnid in sorted(wnid_to_index):
+        d = subdirs[wnid]
+        if not d.is_dir():
+            continue
+        imgs = sorted(p for p in d.iterdir() if p.suffix.lower() in EXTS)
+        if n_per_class:
+            imgs = imgs[:n_per_class]
+        paths.extend(str(p) for p in imgs)
+        labels.extend([wnid_to_index[wnid]] * len(imgs))
+    return paths, np.asarray(labels, dtype=np.int32)
+
+
+# --------------------------------------------------------------------------- #
+# GPU compute
+# --------------------------------------------------------------------------- #
+def load_image(path):
+    """Load one image as a (3, 224, 224) float tensor in [0, 1].
+
+    Resize the short side to 256, centre-crop 224, to tensor - the standard
+    ImageNet eval geometry, applied before any filtering or normalisation.
+    """
+    pil = Image.open(path).convert("RGB")
+    pil = TF.center_crop(TF.resize(pil, 256), [224, 224])
+    return TF.to_tensor(pil)
+
+
+@torch.no_grad()
+def spectral_views(images, energies, bisect_iters=18):
+    """Build the low-pass view stack and the per-image cutoffs, batched on GPU.
+
+    View 0 is the original image; view k>0 is the original low-passed with a
+    Gaussian whose cutoff is solved (by batched bisection on the retained-energy
+    fraction) so the view keeps 'energies[k-1]' of that image's spectral energy.
+    This is the vectorised equivalent of 'src.filters.make_spectral_views' + 
+   'cutoffs_for_energy_ladder'.
+
+    Args:
+        images: (B, 3, H, W) tensor in [0, 1] on the target device.
+        energies: iterable of K retained-energy targets.
+        bisect_iters: bisection steps per target (18 -> ~1e-6 precision).
+
+    Returns:
+        (views, cutoffs): views (B, K+1, 3, H, W) in [0, 1],
+        cutoffs (B, K) float.
+    """
+    b, c, h, w = images.shape
+    spec = torch.fft.fftshift(torch.fft.fft2(images, dim=(-2, -1)), dim=(-2, -1))
+    power = spec.abs() ** 2
+    total = power.sum(dim=(-3, -2, -1))                       # (B,)
+
+    y = torch.linspace(-1.0, 1.0, h, device=images.device)
+    x = torch.linspace(-1.0, 1.0, w, device=images.device)
+    yy, xx = torch.meshgrid(y, x, indexing="ij")
+    r2 = xx ** 2 + yy ** 2                                    # (H,W)
+
+    def mask(cutoff):                                         # cutoff (B,)
+        return torch.exp(-r2[None] / (2.0 * cutoff[:, None, None] ** 2))
+
+    def kept_fraction(cutoff):
+        m = mask(cutoff)[:, None]                             # (B,1,H,W)
+        return (power * m).sum(dim=(-3, -2, -1)) / total      # (B,)
+
+    views = [images]
+    cutoffs = []
+    for target in energies:
+        lo = torch.full((b,), 1e-3, device=images.device)
+        hi = torch.full((b,), 1.0, device=images.device)
+        for _ in range(bisect_iters):
+            mid = 0.5 * (lo + hi)
+            need_larger = kept_fraction(mid) < target
+            lo = torch.where(need_larger, mid, lo)
+            hi = torch.where(need_larger, hi, mid)
+        cut = 0.5 * (lo + hi)
+        cutoffs.append(cut)
+        filtered = torch.fft.ifft2(
+            torch.fft.ifftshift(spec * mask(cut)[:, None], dim=(-2, -1)),
+            dim=(-2, -1),
+        ).real
+        views.append(filtered.clamp(0.0, 1.0))
+
+    return torch.stack(views, dim=1), torch.stack(cutoffs, dim=1)
+
+
+@torch.no_grad()
+def spectral_views_fixed(images, cutoffs=FIXED_CUTOFFS):
+    """Low-pass view stack using the same absolute cutoffs for every image.
+
+    Diagnostic finding this exists to fix: the energy-normalised ladder in
+    `spectral_views` solves each cutoff so the view keeps a target fraction of
+    *that image's* spectral energy. For an already-low-frequency image (e.g.
+    one corrupted by blur or fog, whose spectrum is naturally concentrated near
+    DC), "keep 99% of energy" is satisfied by a very narrow, aggressive mask -
+    so the mildest rung of the energy ladder already devastates these images,
+    while it stays mild for noise-corrupted images (whose spectra are spread
+    out). Fixed cutoffs apply the same absolute filter regardless of the
+    image's own spectral shape, so filter strength no longer depends on the
+    corruption. See scripts/cache_profiles.py --ladder fixed.
+
+    Args:
+        images: (B, 3, H, W) tensor in [0, 1] on the target device.
+        cutoffs: iterable of K absolute cutoffs (same for every image).
+
+    Returns:
+        (B, K+1, 3, H, W) tensor in [0, 1]; view 0 is the original.
+    """
+    spec = torch.fft.fftshift(torch.fft.fft2(images, dim=(-2, -1)), dim=(-2, -1))
+    h, w = images.shape[-2:]
+    views = [images]
+    for c in cutoffs:
+        mask = radial_lowpass_mask(h, w, c, device=images.device, dtype=images.dtype)
+        filtered = torch.fft.ifft2(
+            torch.fft.ifftshift(spec * mask, dim=(-2, -1)), dim=(-2, -1),
+        ).real
+        views.append(filtered.clamp(0.0, 1.0))
+    return torch.stack(views, dim=1)
+
+
+@torch.no_grad()
+def view_probs(model, views):
+    """Normalise every view and run it through the model.
+
+    Args:
+        model: a frozen classifier.
+        views: (B, K+1, 3, H, W) tensor in [0, 1].
+
+    Returns:
+        (B, K+1, num_classes) tensor of softmax probabilities.
+    """
+    b, k1 = views.shape[:2]
+    flat = views.reshape(b * k1, *views.shape[2:])
+    flat = TF.normalize(flat, MEAN, STD)
+    logits = model(flat)
+    return torch.softmax(logits, dim=-1).reshape(b, k1, -1)
+
+
+@torch.no_grad()
+def compute_condition(model, image_paths, device, energies=ENERGIES,
+                      batch_size=64, workers=8, ladder="energy"):
+    """Compute the full profile array for a list of images.
+
+    ~4-5 ms/image on an A10 (batched forward, GPU filtering, threaded loading).
+
+    Args:
+        model: a frozen classifier already on 'device'.
+        image_paths: list of image paths (from 'list_condition_images').
+        device: torch device.
+        energies: the energy ladder targets, used when ladder == "energy".
+            When ladder == "fixed", only `len(energies)` is used (to size the
+            output) - the actual cutoffs are `FIXED_CUTOFFS`.
+        batch_size: images per GPU batch (lower for DeiT if memory is tight).
+        workers: threads for image loading.
+        ladder: "energy" (per-image adaptive, the original design) or "fixed"
+            (same absolute cutoffs for every image - see
+            `spectral_views_fixed` for why this exists).
+
+    Returns:
+        (probs, cutoffs): probs (N, K+1, 1000) float16 softmax outputs,
+        cutoffs (N, K) float32 - the low-pass cutoffs actually used per image
+        (identical across images when ladder == "fixed").
+    """
+    k = len(energies)
+    n = len(image_paths)
+    probs = np.empty((n, k + 1, 1000), dtype=np.float16)
+    cutoffs = np.empty((n, k), dtype=np.float32)
+    if ladder == "fixed":
+        fixed = np.asarray(FIXED_CUTOFFS[:k], dtype=np.float32)
+
+    with ThreadPoolExecutor(workers) as pool:
+        for i in range(0, n, batch_size):
+            chunk = image_paths[i:i + batch_size]
+            batch = torch.stack(list(pool.map(load_image, chunk))).to(device)
+            if ladder == "fixed":
+                views = spectral_views_fixed(batch, FIXED_CUTOFFS[:k])
+                cutoffs[i:i + len(chunk)] = fixed
+            else:
+                views, cut = spectral_views(batch, energies)
+                cutoffs[i:i + len(chunk)] = cut.cpu().numpy()
+            p = view_probs(model, views)
+            probs[i:i + len(chunk)] = p.cpu().numpy().astype(np.float16)
+    return probs, cutoffs
+
+
+# --------------------------------------------------------------------------- #
+# disk io
+# --------------------------------------------------------------------------- #
+def condition_path(model_name, corruption, severity):
+    """'cache/<model>/<corruption>/<severity>.npz' (severity forced to 0 for clean)."""
+    sev = "0" if corruption == "clean" else str(severity)
+    return CACHE_ROOT / model_name / corruption / f"{sev}.npz"
+
+
+def save_condition(model_name, corruption, severity, *, probs, cutoffs, labels,
+                   paths, energies=ENERGIES):
+    """Write one condition to a compressed .npz. Returns the path written."""
+    out = condition_path(model_name, corruption, severity)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        out,
+        probs=probs,
+        cutoffs=cutoffs,
+        labels=np.asarray(labels, dtype=np.int32),
+        paths=np.asarray([str(p) for p in paths]),
+        energies=np.asarray(energies, dtype=np.float32),
+    )
+    return out
+
+
+def load_condition(model_name, corruption, severity):
+    """Load one cached condition.
+
+    Returns:
+        dict with 'probs' (N, K+1, 1000) float16, 'cutoffs' (N, K) float32,
+       'labels' (N,) int32, 'paths' (N,) str, 'energies' (K,) float32.
+    """
+    d = np.load(condition_path(model_name, corruption, severity), allow_pickle=False)
+    return {
+        "probs": d["probs"],
+        "cutoffs": d["cutoffs"],
+        "labels": d["labels"],
+        "paths": d["paths"],
+        "energies": d["energies"],
+    }
+
+
+def has_condition(model_name, corruption, severity):
+    """True if this condition has already been cached."""
+    return condition_path(model_name, corruption, severity).exists()

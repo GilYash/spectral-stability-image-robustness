@@ -1,221 +1,149 @@
-# First real stability profile for one image: build the view stack, run each
-# view through a frozen classifier, and look at all three signals (C_k, A_k,
-# S_k) across the ladder. We filter in [0,1] space and apply ImageNet
-# normalization per view.
+"""Spectral stability profile for a single image.
 
+Builds the energy-ladder view stack, runs each view through a frozen
+classifier, and reports the per-view predictions, the three raw signals
+(C_k, A_k, S_k) and the fused prediction under a chosen config. Saves two
+figures: the view stack and the signal curves.
+
+    python scripts/profile_single_image.py --image <ImageNet-C image> [--model deit]
+    python scripts/profile_single_image.py --image <img> --beta 0 --gamma 0 --tau 0.05
+"""
 import argparse
 import os
-from pathlib import Path
 import sys
-from src.fusion import adaptive_fusion
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import matplotlib.pyplot as plt
-import torch
-from torchvision.transforms import functional as TF
-from PIL import Image
 import numpy as np
+import torch
+from PIL import Image
+from torchvision.transforms import functional as TF
 
+from src import analysis
 from src.filters import make_spectral_views, cutoffs_for_energy_ladder
-from src.signals import (
-    view_probabilities, confidence, cross_view_agreement, local_stability,
-)
 from src.models import load_resnet18, load_deit_tiny
 from src.imagenet_labels import class_name, true_index_from_path
 
-# Normalization for the models
 MEAN = [0.485, 0.456, 0.406]
 STD = [0.229, 0.224, 0.225]
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--image", required=True)
-    parser.add_argument("--model", choices=["resnet18", "deit"], default="resnet18")
-    parser.add_argument("--output", default="figures/first_profile.png")
-    parser.add_argument(
-        "--energies", type=float, nargs="+",
-        default=np.arange(0.995, 0.92, -0.0025),
-        help="target fraction of energy retained per view (sets the ladder)",
-    )
-    args = parser.parse_args()
+    """Profile one image: build views, run the model, print signals, save figures."""
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--image", required=True)
+    ap.add_argument("--model", choices=["resnet18", "deit"], default="resnet18")
+    ap.add_argument("--output", default="figures/profile.png")
+    ap.add_argument("--energies", type=float, nargs="+",
+                    default=list(np.arange(0.995, 0.92, -0.0025)),
+                    help="retained-energy target per view (sets the ladder)")
+    ap.add_argument("--alpha", type=float, default=1.0)
+    ap.add_argument("--beta", type=float, default=1.0)
+    ap.add_argument("--gamma", type=float, default=1.0)
+    ap.add_argument("--tau", type=float, default=0.1)
+    ap.add_argument("--no-standardize", action="store_true")
+    ap.add_argument("--m", type=int, default=1)
+    args = ap.parse_args()
 
-    # Set the device (Cuda, MPS, or CPU) for model inference
     device = torch.device(
         "cuda" if torch.cuda.is_available()
         else "mps" if torch.backends.mps.is_available()
         else "cpu"
     )
     print("device:", device)
-
-    # Load the model based on the specified argument
     model = (load_resnet18 if args.model == "resnet18" else load_deit_tiny)(device)[0]
 
-    # Load and preprocess the image - resize, center crop, and convert to tensor
+    # image -> [0,1] tensor, standard ImageNet eval geometry
     pil = Image.open(args.image).convert("RGB")
     pil = TF.center_crop(TF.resize(pil, 256), [224, 224])
     image = TF.to_tensor(pil)
 
-    # Low-pass filter cutoffs based on energy retention
+    # energy-spaced low-pass ladder, then the view stack
     cutoffs = cutoffs_for_energy_ladder(image, args.energies)
-    print("energy targets:", args.energies)
     print("solved cutoffs:", [round(c, 4) for c in cutoffs])
-
-    # Generate spectral views of the image based on the specified cutoffs
     views = make_spectral_views(image, cutoffs=cutoffs).to(device)
 
-    # Run the model on the generated views and compute the relevant signals
     with torch.no_grad():
         logits = model(TF.normalize(views, MEAN, STD))
+    probs = torch.softmax(logits, dim=-1).cpu().numpy()[None]   # (1, K+1, C)
 
-    # Compute the probabilities, confidence, cross-view agreement, local stability, and predictions for each view
-    probs = view_probabilities(logits)
-    C = confidence(probs)
-    A = cross_view_agreement(probs)
-    S = local_stability(probs, m=1)
-    preds = probs.argmax(dim=-1)
+    # raw signals (for the printed table and the plot)
+    C, A, S = analysis.profile_signals(probs, m=args.m, standardize=False)
 
-    # Adaptive fusion of all spectral views
-    fused_probs, fusion_weights, reliability_scores = adaptive_fusion(
-        probs,
-        C,
-        A,
-        S,
-        alpha=1.0,
-        beta=1.0,
-        gamma=1.0,
-        tau=0.1,
-    )
+    # fused prediction under the chosen config
+    if args.no_standardize:
+        Cs, As, Ss = C, A, S
+    else:
+        Cs, As, Ss = analysis.zscore(C), analysis.zscore(A), analysis.zscore(S)
+    scores = analysis.reliability(Cs, As, Ss, args.alpha, args.beta, args.gamma)
+    weights = analysis.fusion_weights(scores, tau=args.tau)
+    fused = analysis.fuse(probs, weights)[0]                    # (C,)
 
-    fused_pred = fused_probs.argmax().item()
-    fused_confidence = fused_probs.max().item()
+    C, A, S, scores, weights = C[0], A[0], S[0], scores[0], weights[0]
+    preds = probs[0].argmax(-1)
+    fused_pred = int(fused.argmax())
 
-    # Determine the true class index and WordNet ID from the image path, if available
     true_idx, wnid = true_index_from_path(args.image)
     if true_idx is not None:
         print(f"true class: {true_idx} = {class_name(true_idx)}  ({wnid})")
     else:
         print("true class: unknown (path is not ImageNet-C style)")
 
-    labels = ["original"] + [f"E={e:.4f}" for e in args.energies]
+    ladder = ["original"] + [f"E={e:.4f}" for e in args.energies]
 
-    # Visualize all spectral views in a single figure
-    views_cpu = views.detach().cpu()
+    # ---- per-view table ----
+    print(f"\n{'view':>10} {'C_k':>8} {'A_k':>8} {'S_k':>8} "
+          f"{'weight':>8} {'pred':>6}  class")
+    for name, ck, ak, sk, wk, pk in zip(ladder, C, A, S, weights, preds):
+        mark = "*" if (true_idx is not None and pk == true_idx) else " "
+        print(f"{name:>10} {ck:>8.4f} {ak:>8.4f} {sk:>8.4f} {wk:>8.4f} "
+              f"{pk:>6d}{mark} {class_name(int(pk))}")
+    if true_idx is not None:
+        print(f"\n{int((preds == true_idx).sum())}/{len(preds)} views correct; "
+              f"{int((preds[1:] == preds[0]).sum())}/{len(preds) - 1} agree with the original")
 
-    fig_views, axes_views = plt.subplots(
-        2, 3,
-        figsize=(12, 8)
-    )
+    # ---- fusion result ----
+    print(f"\nfused prediction: {fused_pred} = {class_name(fused_pred)}  "
+          f"(p={fused.max():.4f})", end="")
+    if true_idx is not None:
+        print(f"  {'correct' if fused_pred == true_idx else 'wrong'}")
+    else:
+        print()
 
-    axes_views = axes_views.flatten()
+    # ---- figures ----
+    Path(args.output).parent.mkdir(parents=True, exist_ok=True)
 
-    for ax, view, label in zip(
-            axes_views,
-            views_cpu,
-            labels
-    ):
+    v = views.detach().cpu()
+    n = len(ladder)
+    cols = min(4, n)
+    rows = (n + cols - 1) // cols
+    fig, axes = plt.subplots(rows, cols, figsize=(3 * cols, 3 * rows))
+    for ax, view, name in zip(np.ravel(axes), v, ladder):
         ax.imshow(view.permute(1, 2, 0).clamp(0, 1))
-        ax.set_title(label)
+        ax.set_title(name, fontsize=9)
         ax.axis("off")
+    for ax in np.ravel(axes)[n:]:
+        ax.axis("off")
+    fig.tight_layout()
+    views_out = Path(args.output).with_name(Path(args.output).stem + "_views.png")
+    fig.savefig(views_out, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print("saved", views_out)
 
-    plt.tight_layout()
-
-    views_output = Path("figures/first_profile_views.png")
-    views_output.parent.mkdir(parents=True, exist_ok=True)
-
-    plt.savefig(
-        views_output,
-        dpi=150,
-        bbox_inches="tight"
-    )
-
-    plt.close(fig_views)
-
-    print("saved", views_output)
-
-    print(
-        f"{'view':>10} {'C_k':>8} {'A_k':>8} {'S_k':>8} "
-        f"{'pred':>6} {'correct':>8} {'class name'}"
-    )
-
-    # Print the computed signals and predictions for each view
-    for name, ck, ak, sk, pk in zip(
-        labels, C.tolist(), A.tolist(), S.tolist(), preds.tolist()
-    ):
-        correct = "YES" if (true_idx is not None and pk == true_idx) else "NO"
-        print(
-            f"{name:>10} {ck:>8.4f} {ak:>8.4f} {sk:>8.4f} "
-            f"{pk:>6d} {correct:>8} {class_name(pk)}"
-        )
-    n_match_original = (preds[1:] == preds[0]).sum().item()
-
-    print(
-        f"{n_match_original}/{len(preds) - 1} filtered views "
-        f"match the original's prediction"
-    )
-
-    if true_idx is not None:
-        n_correct = (preds == true_idx).sum().item()
-
-        print(
-            f"{n_correct}/{len(preds)} views are correct"
-        )
-
-    print()
-    print("=" * 60)
-    print("FUSION")
-    print("=" * 60)
-
-    fusion_correct = (
-            true_idx is not None
-            and fused_pred == true_idx
-    )
-
-    print(
-        f"prediction: {fused_pred} = {class_name(fused_pred)}"
-    )
-
-    print(
-        f"confidence: {fused_confidence:.4f}"
-    )
-
-    if true_idx is not None:
-        print(
-            f"correct: {'YES' if fusion_correct else 'NO'}"
-        )
-
-    print()
-    print("View weights:")
-
-    for label, weight, score in zip(
-            labels,
-            fusion_weights.tolist(),
-            reliability_scores.tolist(),
-    ):
-        print(
-            f"{label:>10} "
-            f"weight={weight:.4f} "
-            f"score={score:.4f}"
-        )
-
-    # Visualize the signals (C_k, A_k, S_k) across the ladder of views
-    x = range(len(C))
+    x = range(n)
     fig, axes = plt.subplots(3, 1, figsize=(7, 9), sharex=True)
     for ax, sig, name in zip(axes, [C, A, S], ["C_k", "A_k", "S_k"]):
-        ax.plot(x, sig.cpu(), "o-")
+        ax.plot(x, sig, "o-")
         ax.set_ylabel(name)
         ax.grid(True, alpha=0.3)
     axes[-1].set_xticks(list(x))
-    axes[-1].set_xticklabels(labels, rotation=45, ha="right")
-    plt.tight_layout()
-
-    # Save the plot
-    out = Path(args.output)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(out, dpi=150, bbox_inches="tight")
-    print("saved", out)
+    axes[-1].set_xticklabels(ladder, rotation=45, ha="right")
+    fig.tight_layout()
+    fig.savefig(args.output, dpi=150, bbox_inches="tight")
+    print("saved", args.output)
 
 
 if __name__ == "__main__":

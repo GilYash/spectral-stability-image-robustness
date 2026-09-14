@@ -1,8 +1,11 @@
 """
 Smoke test: load both classifiers and their transforms, print success.
 Run once after install to check the pretrained weights download and load.
+Unlike test_analysis.py, this one needs network access (first run downloads
+the weights) and will use a GPU/MPS device if one is available, though CPU
+also works.
 
-run: python test_models.py
+run: PYTHONPATH=. python test/test_models.py
 """
 import torch
 

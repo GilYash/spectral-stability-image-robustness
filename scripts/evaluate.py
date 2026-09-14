@@ -37,7 +37,8 @@ from src.splits import CORRUPTION_FAMILY, FAMILIES, tune_test_masks
 
 #: columns of the per-condition CSV
 ROW_FIELDS = ["model", "corruption", "family", "severity", "n",
-              "orig_acc", "equal_acc", "conf_acc", "fused_acc", "oracle_acc",
+              "orig_acc", "equal_acc", "conf_acc", "agree_acc", "view1_acc",
+              "fused_acc", "oracle_acc",
               "orig_ece", "fused_ece", "negative_transfer", "positive_transfer"]
 
 
@@ -70,7 +71,7 @@ def config_picker(args, model_name, tag=None):
     """
     if not args.tuning:
         manual = FusionConfig(args.alpha, args.beta, args.gamma, args.tau,
-                              not args.no_standardize, args.m)
+                              not args.no_standardize, args.m, args.agreement)
         return lambda corruption: manual, "manual"
 
     path = latest_tuning(model_name, tag) if args.tuning == "auto" else args.tuning
@@ -104,6 +105,10 @@ def main():
     ap.add_argument("--tau", type=float, default=1.0)
     ap.add_argument("--no-standardize", action="store_true")
     ap.add_argument("--m", type=int, default=1)
+    ap.add_argument("--agreement", choices=["all", "origin"], default="all")
+    ap.add_argument("--ladder-len", type=int, default=None,
+                    help="see tune_fusion.py --ladder-len; must match what the "
+                         "tuning config (if any) was produced with")
     ap.add_argument("--out", default="results")
     ap.add_argument("--cache-dir", default="cache",
                     help="read profiles from this cache (must match cache_profiles.py --cache-dir)")
@@ -134,7 +139,8 @@ def main():
                 else:
                     mask = np.ones(len(d["labels"]), dtype=bool)
                 cfg = pick(corruption)
-                r = score(precompute(d["probs"][mask], m=cfg.m),
+                r = score(precompute(d["probs"][mask], m=cfg.m, agreement=cfg.agreement,
+                                    ladder_len=args.ladder_len),
                           d["labels"][mask], cfg, full=True)
                 r.update(model=model_name, corruption=corruption,
                          family=CORRUPTION_FAMILY[corruption], severity=sev)
@@ -145,7 +151,9 @@ def main():
         if cache.has_condition(model_name, "clean", 0):
             d = cache.load_condition(model_name, "clean", 0)
             cfg = pick("clean")
-            clean_row = score(precompute(d["probs"], m=cfg.m), d["labels"], cfg, full=True)
+            clean_row = score(precompute(d["probs"], m=cfg.m, agreement=cfg.agreement,
+                                        ladder_len=args.ladder_len),
+                              d["labels"], cfg, full=True)
 
         _report(model_name, rows, clean_row, out_dir, stamp, tag)
 
@@ -173,7 +181,8 @@ def _report(model_name, rows, clean_row, out_dir, stamp, tag=None):
             cr = [r for r in rows if r["corruption"] == c]
             if cr:
                 per_corr[c] = {k: _mean(cr, k) for k in
-                               ("orig_acc", "equal_acc", "fused_acc", "oracle_acc",
+                               ("orig_acc", "equal_acc", "conf_acc", "agree_acc",
+                                "view1_acc", "fused_acc", "oracle_acc",
                                 "negative_transfer", "fused_ece")}
 
     summary = {
@@ -183,6 +192,9 @@ def _report(model_name, rows, clean_row, out_dir, stamp, tag=None):
         "clean_fused_acc": clean_row["fused_acc"] if clean_row else None,
         "mCA_orig": _mean(rows, "orig_acc"),
         "mCA_equal": _mean(rows, "equal_acc"),
+        "mCA_conf": _mean(rows, "conf_acc"),
+        "mCA_agree": _mean(rows, "agree_acc"),
+        "mCA_view1": _mean(rows, "view1_acc"),
         "mCA_fused": _mean(rows, "fused_acc"),
         "mCA_oracle": _mean(rows, "oracle_acc"),
         "mean_negative_transfer": _mean(rows, "negative_transfer"),
@@ -195,8 +207,8 @@ def _report(model_name, rows, clean_row, out_dir, stamp, tag=None):
     json_path.write_text(json.dumps(summary, indent=2))
 
     # console table
-    print(f"{'corruption':>18} {'orig':>7} {'equal':>7} {'fused':>7} "
-          f"{'oracle':>7} {'neg-tr':>7}")
+    print(f"{'corruption':>18} {'orig':>7} {'equal':>7} {'conf':>7} {'agree':>7} "
+          f"{'view1':>7} {'fused':>7} {'oracle':>7} {'neg-tr':>7}")
     print("-" * 60)
     for fam, corrs in FAMILIES.items():
         for c in corrs:
@@ -204,14 +216,18 @@ def _report(model_name, rows, clean_row, out_dir, stamp, tag=None):
                 continue
             p = per_corr[c]
             print(f"{c:>18} {p['orig_acc']*100:>6.1f} {p['equal_acc']*100:>6.1f} "
+                  f"{p['conf_acc']*100:>6.1f} {p['agree_acc']*100:>6.1f} "
+                  f"{p['view1_acc']*100:>6.1f} "
                   f"{p['fused_acc']*100:>6.1f} {p['oracle_acc']*100:>6.1f} "
                   f"{p['negative_transfer']*100:>6.1f}")
     print("-" * 60)
     if clean_row:
         print(f"{'clean':>18} {clean_row['orig_acc']*100:>6.1f} {'':>7} "
-              f"{clean_row['fused_acc']*100:>6.1f}")
+              f"{'':>7} {'':>7} {'':>7} {clean_row['fused_acc']*100:>6.1f}")
     print(f"{'mean corrupted':>18} {summary['mCA_orig']*100:>6.1f} "
-          f"{summary['mCA_equal']*100:>6.1f} {summary['mCA_fused']*100:>6.1f} "
+          f"{summary['mCA_equal']*100:>6.1f} {summary['mCA_conf']*100:>6.1f} "
+          f"{summary['mCA_agree']*100:>6.1f} {summary['mCA_view1']*100:>6.1f} "
+          f"{summary['mCA_fused']*100:>6.1f} "
           f"{summary['mCA_oracle']*100:>6.1f} {summary['mean_negative_transfer']*100:>6.1f}")
     print(f"  fused - orig : {(summary['mCA_fused']-summary['mCA_orig'])*100:+.1f} pts")
     print(f"  worst corruption (fused): {summary['worst_corruption']}")

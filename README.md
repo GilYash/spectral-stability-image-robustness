@@ -25,9 +25,10 @@ Then average the views with those trust weights.
 ### 🗝️ Key Ideas
 
 - **Frozen classifier** - no retraining, no corruption labels, no source data, no parameter updates.
-- **Frequency views** - the image low-pass filtered at a ladder of strengths (two ladders are compared: per-image energy-adaptive, and fixed absolute cutoffs - see Results below).
+- **Frequency views** - the image low-pass filtered at a ladder of strengths (two ladders compared: per-image energy-adaptive, and fixed absolute cutoffs).
 - **Three trust signals** - confidence, agreement across views, and stability along the ladder, combined into softmax fusion weights.
-- **Honest evaluation** - coefficients tuned leave-one-corruption-family-out, on a disjoint half of the images.
+- **Combining view families** - the same fusion mechanism also arbitrates across a second, structurally different view family (spatial-TTA crop/flip views), for free since both are already cached, and this beats either family alone - see [`RESULTS.md`](RESULTS.md).
+- **Honest evaluation** - coefficients tuned leave-one-corruption-family-out, on a disjoint half of the images, with bootstrap confidence intervals on every headline delta.
 - **Two architectures** - ResNet-18 and DeiT-Tiny, fed identical pixels, to test whether a CNN and a ViT behave differently.
 
 ## 🚀 Quick Start
@@ -44,7 +45,7 @@ Then average the views with those trust weights.
 python -m venv .venv && source .venv/bin/activate
 python -m pip install -r requirements.txt
 
-python test_models.py                        # pull the pretrained weights
+PYTHONPATH=. python test/test_models.py      # pull the pretrained weights
 PYTHONPATH=. python test/test_analysis.py    # should print "all passed"
 ```
 
@@ -60,63 +61,36 @@ python scripts/fetch_imagenet_c.py      # corrupted images (safe to stop and re-
 
 ## 💻 Usage
 
-The pipeline is split so the GPU work happens once and everything after is fast
-NumPy you can re-run while changing parameters.
-
-### The pipeline
+The pipeline is split so the GPU work happens once and everything after is
+fast NumPy you can re-run while changing parameters:
 
 ```bash
-python scripts/cache_profiles.py            # GPU, once: every profile -> cache/  (~40 min/model, ~10 GB)
-python scripts/tune_fusion.py               # grid-search the fusion coefficients, leave-one-family-out
-python scripts/evaluate.py --tuning auto    # score every condition -> results/eval_<model>_<time>.csv
+python scripts/cache_profiles.py --ladder fixed --cache-dir cache_fixed  # GPU, once: every profile -> cache_fixed/  (~40 min/model)
+python scripts/tune_fusion.py --cache-dir cache_fixed                    # grid-search the fusion coefficients, leave-one-family-out
+python scripts/evaluate.py --cache-dir cache_fixed --tuning auto         # score every condition -> results/eval_<model>_<time>.csv
 ```
 
-### Try one setting by hand
-
-```bash
-python scripts/evaluate.py --alpha 1 --beta 0.5 --gamma 0.5 --tau 0.1
-```
-
-### Inspect a single image
-
-```bash
-python scripts/profile_single_image.py --image data/imagenet-c/gaussian_noise/3/<wnid>/<img>.JPEG
-python scripts/show_filter_views.py    --image <same image>
-python scripts/verify_filter_energy.py --image <same image>
-```
+Every other script - the spatial-TTA baseline, the combined view-family
+profile, statistical rigor, the signal-ceiling analysis, single-image
+inspection, figure generation - is catalogued with copy-pasteable commands in
+[`scripts/README.md`](scripts/README.md).
 
 ## 📊 Results
 
-100-class ImageNet-C, held-out image half, leave-one-family-out configs. Mean
-over 15 corruptions x 5 severities. Two view families are compared: **energy**
-(the original design, cutoffs solved per image to keep a target fraction of
-that image's spectral energy) and **fixed** (same absolute cutoffs for every
-image - the full reason is in Where to Push Next below):
+Headline: fusing across **both** a spectral low-pass ladder and a
+spatial-TTA ensemble (crop + flip) beats either view family alone, on both
+architectures, with 95% confidence:
 
-| metric | ResNet-18 energy | ResNet-18 fixed | DeiT-Tiny energy | DeiT-Tiny fixed |
-|---|:--:|:--:|:--:|:--:|
-| original view | 32.6% | 32.6% | 44.0% | 44.0% |
-| fused (tuned) | 31.6% | **33.5%** | 40.8% | **44.0%** |
-| fused - original | -0.9 pts | **+0.9 pts** | -3.2 pts | **+0.0 pts** |
-| per-image oracle | 39.3% | 41.0% | 50.6% | 52.4% |
-| clean (orig / fused) | 68.9 / 64.7 | 68.9 / 67.7 | 70.1 / 66.1 | 70.1 / 68.7 |
-| mean negative transfer | 13.7% | 8.5% | 14.5% | 8.0% |
+| | ResNet-18 | DeiT-Tiny |
+|---|:--:|:--:|
+| original -> combined fusion | 32.6% -> **34.9%** (+2.4 pts) | 44.0% -> **45.9%** (+2.0 pts) |
+| vs. spatial-TTA alone (95% CI) | +0.47 [+0.39, +0.56] | +0.39 [+0.31, +0.48] |
 
-- **The energy ladder does not work; fixed cutoffs do.** Under `energy`, tuning
-  collapses to confidence-only (beta = gamma = 0, near-hard view selection) on
-  both models - agreement and stability carry no signal. Under `fixed`, every
-  fold uses stability too (and DeiT uses agreement), fusion actually beats the
-  baseline for ResNet-18, and negative transfer is roughly halved on both
-  models. Why: the energy ladder's "mild" cutoffs are
-  only mild for high-frequency corruptions.
-- **Corruption-dependent, as predicted.** Under `fixed`, fusion clearly wins on
-  the three noise types and pixelate (+6 to +9 points), and is close to flat on
-  most blur corruptions; weather and contrast/jpeg/elastic remain small net
-  losses.
-- **Architecture-dependent, as predicted.** ResNet-18 gets a real net win from
-  low-pass views; DeiT-Tiny only reaches parity. Consistent with DeiT's
-  self-attention already acting like a low-pass filter - it starts more robust
-  (44.0% vs 32.6% mean corrupted) and has less to gain from an external one.
+The full story - spectral-only vs. spatial-only vs. combined, every baseline
+the proposal committed to, the per-view mechanism, and a ceiling analysis
+asking whether the remaining oracle gap is a tuning problem or an information
+problem - is in **[`RESULTS.md`](RESULTS.md)**, plotted versions included
+(`scripts/make_report_figures.py`).
 
 ## 🏗️ Architecture
 
@@ -130,9 +104,11 @@ x_k = F^-1( F(x) · M_k )          k = 1 ... K
 ```
 
 `F` is the 2-D DFT and each `M_k` is a smooth Gaussian low-pass mask. The masks
-get progressively stronger, and the cutoff for each view is solved **per image**
-so the view keeps a target fraction of that image's spectral energy (default
-ladder: keep 99%, 98%, ... 93%).
+get progressively stronger; two cutoff schedules are implemented (see
+`RESULTS.md` for why the fixed one is used for the headline numbers):
+per-image energy-adaptive (`spectral_views`, keep a target fraction of that
+image's own spectral energy) and fixed absolute cutoffs
+(`spectral_views_fixed`), both in `src/cache.py`.
 
 Every view goes through the **same frozen classifier**, giving the profile
 `S(x) = (p_0, ... , p_K)`. From it we read three trust signals per view:
@@ -155,37 +131,24 @@ p*  = Σ_k w_k · p_k
 
 `p*` is judged against the original view alone, an equal-weight average, a
 confidence-only weighting, and a per-image oracle (right if *any* view is - the
-ceiling for any weighting scheme).
-
-That per-image energy-adaptive cutoff is one of two ladders implemented -
-`src/cache.py` also has `spectral_views_fixed`, the same absolute cutoffs for
-every image, which the results above show working a lot better. See
-Where to Push Next below for why.
+ceiling for any weighting scheme). Full results: [`RESULTS.md`](RESULTS.md).
 
 ### Project Structure
 
 ```
-src/
-  filters.py           low-pass mask bank + the per-image energy ladder
-  analysis.py          the profile maths: C_k, A_k, S_k and softmax fusion
-  metrics.py           accuracy, ECE, oracle bound, negative / positive transfer
-  splits.py            corruption families, leave-one-family-out, disjoint image halves
-  cache.py             build and load the profile cache
-  models.py            frozen ResNet-18 and DeiT-Tiny
-  imagenet_labels.py   image path -> true ImageNet index
+src/       library code - the profile maths, metrics, caching, models     -> src/README.md
+scripts/   every entry point - data fetch, GPU caching, tuning, analysis  -> scripts/README.md
+data/      the ImageNet-C subset + clean val, and how to (re)fetch it     -> data/README.md
+test/      unit tests for the profile maths (no GPU or data needed)
+```
 
-scripts/
-  build_subset.py           pick the fixed 100-class subset          |
-  fetch_clean_images.py     clean ImageNet-val for those classes     |  data - see data/README.md
-  fetch_imagenet_c.py       download ImageNet-C for those classes    |
-  cache_profiles.py         GPU, once: compute every profile -> cache/
-  tune_fusion.py            grid-search alpha, beta, gamma, tau
-  evaluate.py               score every condition, write one results table
-  show_filter_views.py      \
-  verify_filter_energy.py    >  look at one image
-  profile_single_image.py   /
+Generated locally by the scripts above, gitignored (not in this repo -
+regenerate them any time):
 
-test/test_analysis.py       unit tests for the profile maths (no GPU or data needed)
+```
+cache/, cache_fixed/, cache_spatial/, cache_combined/   the profile caches
+results/                                                evaluation output
+figures/                                                report-ready PNGs
 ```
 
 ## ⚠️ Gotchas
@@ -204,49 +167,16 @@ test/test_analysis.py       unit tests for the profile maths (no GPU or data nee
   to standardise is itself part of the tuning grid.
 - **Tuning never sees the family it is scored on**, and tunes on a disjoint
   image half.
+- **GPU env**: `requirements.txt` needs an env with CUDA torch; see
+  `scripts/README.md` if you have more than one Python env on the machine.
 
-## 🔬 Where to Push Next
-
-**Diagnosis that led to the fixed ladder.** Splitting per-view accuracy by
-corruption family showed the energy ladder's first, "mildest" rung already
-crushes blur/weather/digital while staying gentle for noise. The reason: its
-cutoff is solved per image to keep a target *fraction of that image's own
-spectral energy*, and a blur- or fog-corrupted image's spectrum is already
-concentrated near DC (the corruption removed the high frequencies itself), so
-keeping 99% of its energy takes a narrow, aggressive mask - solved cutoff 0.12
-for defocus_blur vs 0.66 for gaussian_noise at the *same* nominal target.
-`spectral_views_fixed` in `src/cache.py` uses the same absolute cutoffs for
-every image instead, which is the whole effect in the results table above.
-Confirmed this was the real bottleneck, not the fusion coefficients: tuning
-*per corruption* (maximum possible specialisation) gave the same numbers as
-family-level tuning - no amount of re-weighting fixes a bad view family.
-
-Build and evaluate the fixed ladder yourself:
-
-```bash
-python scripts/cache_profiles.py --ladder fixed --cache-dir cache_fixed
-python scripts/tune_fusion.py --cache-dir cache_fixed
-python scripts/evaluate.py --cache-dir cache_fixed --tuning auto
-```
-
-Still open - weather and contrast/jpeg/elastic remain small net losses even
-under the fixed ladder, and DeiT-Tiny only reaches parity, not a win:
-
-- a milder or differently-spaced `FIXED_CUTOFFS`, calibrated per family;
-- **band-pass** views instead of low-pass, so mid frequencies survive;
-- more views, or views chosen per image;
-- why agreement stays at zero weight for ResNet-18 even now - nested low-passes
-  are correlated by construction and can form a self-agreeing cluster.
-
-Everything after `cache_profiles.py` runs in seconds, so this is cheap to
-explore.
 
 ## 🐛 Troubleshooting
 
 - **`no results/tuning_<model>_*.json found`** - run `scripts/tune_fusion.py`
   before `scripts/evaluate.py --tuning auto`.
 - **`evaluate.py` / `tune_fusion.py` skip everything** - they read `cache/`; run
-  `scripts/cache_profiles.py` first.
+  `scripts/cache_profiles.py` first (or pass the matching `--cache-dir`).
 - **ImageNet-C download is slow or drops mid-way** - expected, the source
   server throttles. Re-run `scripts/fetch_imagenet_c.py`; it resumes.
 - **macOS `CERTIFICATE_VERIFY_FAILED`** when pulling model weights - run the
@@ -258,4 +188,3 @@ explore.
 ImageNet-C: Hendrycks and Dietterich, *Benchmarking Neural Network Robustness to
 Common Corruptions and Perturbations*, ICLR 2019
 ([Zenodo 2235448](https://zenodo.org/records/2235448)).
-

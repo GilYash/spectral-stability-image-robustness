@@ -71,19 +71,55 @@ def agreement_from_d(d):
     return -d.sum(axis=-1) / (n - 1)
 
 
-def stability_from_d(d, m=1):
+def stability_from_d(d, m=1, ladder_len=None):
     """S_k from a precomputed pairwise-JSD matrix 'd' (M, K+1, K+1).
 
     S_k = - mean JSD from view k to the views within 'm' ladder rungs (k
     itself excluded).
+
+    Args:
+        d: (..., K+1, K+1) pairwise-JSD array.
+        m: neighbourhood radius in ladder rungs.
+        ladder_len: number of leading views that form an ordered filter
+            ladder (view 0 = original, 1..ladder_len-1 = increasing filter
+            strength). Defaults to the whole profile -- the original
+            single-ladder behaviour. Views at index >= ladder_len have no
+            rung ordering (e.g. spatial-TTA crop/flip views concatenated
+            after the ladder, see scripts/build_combined_cache.py) and get
+            S_k = 0: 'neighbouring filtering levels' isn't defined for them,
+            so they're weighted by confidence/agreement only.
     """
     n = d.shape[-1]
+    L = n if ladder_len is None else ladder_len
     out = np.zeros(d.shape[:-1], dtype=d.dtype)
-    for k in range(n):
-        lo, hi = max(0, k - m), min(n - 1, k + m)
+    for k in range(L):
+        lo, hi = max(0, k - m), min(L - 1, k + m)
         idx = [j for j in range(lo, hi + 1) if j != k]
         out[..., k] = -d[..., k, idx].mean(axis=-1)
     return out
+
+
+def agreement_to_origin(probs):
+    """A0_k = -JSD(p_k, p_0): agreement with the original view only.
+
+    The proposal's pre-registered ablation for a specific failure mode of
+    'agreement()': nested low-passes are correlated by construction, so a
+    heavily-filtered view can find itself in a self-agreeing cluster with
+    other heavily-filtered views even when all of them are wrong (measured:
+    per-view correctness correlates more with this signal than with
+    agreement-to-all-views, e.g. +0.355 vs +0.281 for the weather family on
+    ResNet-18/fixed-ladder). Anchoring agreement to the unfiltered view
+    removes that cluster effect. A0_0 is always 0 (a view compared to
+    itself), same convention as 'agreement_from_d's diagonal.
+
+    Args:
+        probs: (..., K+1, C) array; index -2 is the view axis, view 0 first.
+
+    Returns:
+        (..., K+1) array.
+    """
+    p0 = probs[..., :1, :]
+    return -jensen_shannon(probs, p0)
 
 
 def zscore(x, axis=-1, eps=1e-8):
@@ -98,7 +134,8 @@ def zscore(x, axis=-1, eps=1e-8):
     return (x - mu) / np.where(sd < eps, 1.0, sd)
 
 
-def profile_signals(probs, m=1, standardize=True, chunk=1024):
+def profile_signals(probs, m=1, standardize=True, chunk=1024, agreement="all",
+                    ladder_len=None):
     """Compute C_k, A_k, S_k for every image in a condition.
 
     Args:
@@ -107,19 +144,28 @@ def profile_signals(probs, m=1, standardize=True, chunk=1024):
         standardize: if True, z-score each signal per image (see 'zscore').
         chunk: number of images processed per batch, to bound the
             (chunk, K+1, K+1, C) JSD intermediate.
+        agreement: "all" (agreement_from_d, the original definition) or
+            "origin" (agreement_to_origin, the proposal's pre-registered
+            ablation for the self-agreeing-cluster failure mode).
+        ladder_len: passed to 'stability_from_d' -- see there. None (default)
+            treats the whole profile as one ordered ladder.
 
     Returns:
         (C, A, S), each a (N, K+1) float32 array.
     """
+    if agreement not in ("all", "origin"):
+        raise ValueError(f"agreement must be 'all' or 'origin', got {agreement!r}")
     probs = np.asarray(probs, dtype=np.float32)
     n = probs.shape[0]
     C = confidence(probs)
     A = np.empty(probs.shape[:2], dtype=np.float32)
     S = np.empty(probs.shape[:2], dtype=np.float32)
     for i in range(0, n, chunk):
-        d = pairwise_jsd(probs[i:i + chunk])
-        A[i:i + chunk] = agreement_from_d(d)
-        S[i:i + chunk] = stability_from_d(d, m=m)
+        chunk_probs = probs[i:i + chunk]
+        d = pairwise_jsd(chunk_probs)
+        A[i:i + chunk] = (agreement_to_origin(chunk_probs) if agreement == "origin"
+                          else agreement_from_d(d))
+        S[i:i + chunk] = stability_from_d(d, m=m, ladder_len=ladder_len)
     if standardize:
         C, A, S = zscore(C), zscore(A), zscore(S)
     return C, A, S

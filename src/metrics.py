@@ -21,6 +21,7 @@ class FusionConfig:
         tau: softmax temperature for the fusion weights.
         standardize: z-score each signal per image before weighting.
         m: neighbourhood radius (ladder rungs) for the stability signal.
+        agreement: "all" or "origin" -- see 'analysis.profile_signals'.
     """
     alpha: float = 1.0
     beta: float = 1.0
@@ -28,17 +29,20 @@ class FusionConfig:
     tau: float = 1.0
     standardize: bool = True
     m: int = 1
+    agreement: str = "all"
 
     def as_dict(self):
         """Plain dict of the fields, for JSON output."""
         return dict(alpha=self.alpha, beta=self.beta, gamma=self.gamma,
-                    tau=self.tau, standardize=self.standardize, m=self.m)
+                    tau=self.tau, standardize=self.standardize, m=self.m,
+                    agreement=self.agreement)
 
     @classmethod
     def from_dict(cls, d):
         """Rebuild from a dict, ignoring unknown keys and filling missing ones."""
         return cls(**{k: d[k] for k in
-                      ("alpha", "beta", "gamma", "tau", "standardize", "m") if k in d})
+                      ("alpha", "beta", "gamma", "tau", "standardize", "m", "agreement")
+                      if k in d})
 
 
 def top1(probs):
@@ -104,12 +108,16 @@ def transfer_rates(orig_pred, new_pred, labels):
     }
 
 
-def precompute(probs_views, m=1):
+def precompute(probs_views, m=1, agreement="all", ladder_len=None):
     """Do the config-independent work for a condition once.
 
     Args:
         probs_views: (N, K+1, C) profile array (float16 from the cache is fine).
         m: neighbourhood radius for the stability signal.
+        agreement: "all" or "origin" -- see 'analysis.profile_signals'.
+        ladder_len: see 'analysis.stability_from_d'. None for a single-ladder
+            profile (the spectral-only caches); set to the ladder's length for
+            a combined profile (see scripts/build_combined_cache.py).
 
     Returns:
         dict passed to 'score()': the float32 'probs', the raw (un-standardised)
@@ -117,13 +125,29 @@ def precompute(probs_views, m=1):
         equal-weight-average predictions 'equal_pred'.
     """
     probs_views = np.asarray(probs_views, dtype=np.float32)
-    C, A, S = analysis.profile_signals(probs_views, m=m, standardize=False)
+    C, A, S = analysis.profile_signals(probs_views, m=m, standardize=False,
+                                       agreement=agreement, ladder_len=ladder_len)
     return {
         "probs": probs_views,
         "C": C, "A": A, "S": S,
         "orig": probs_views[:, 0],
         "equal_pred": top1(probs_views.mean(axis=1)),
     }
+
+
+def fused_probs(pre, cfg: FusionConfig):
+    """The (N, C) fused probability vectors p* for one config.
+
+    Factored out of 'score()' so callers that need the fused *predictions*
+    directly (e.g. scripts/bootstrap_ci.py) don't have to re-derive the
+    reliability/softmax steps by hand.
+    """
+    C, A, S = pre["C"], pre["A"], pre["S"]
+    if cfg.standardize:
+        C, A, S = analysis.zscore(C), analysis.zscore(A), analysis.zscore(S)
+    scores = analysis.reliability(C, A, S, cfg.alpha, cfg.beta, cfg.gamma)
+    w = analysis.fusion_weights(scores, tau=cfg.tau)
+    return analysis.fuse(pre["probs"], w)
 
 
 def score(pre, labels, cfg: FusionConfig, full=True):
@@ -138,18 +162,15 @@ def score(pre, labels, cfg: FusionConfig, full=True):
 
     Returns:
         float fused accuracy when 'full' is False, otherwise a dict with the
-        fused predictor's numbers ('fused_acc', 'fused_ece', transfer rates) and
-        the baselines it is judged against ('orig_acc', 'equal_acc',
-        'conf_acc', 'oracle_acc', 'orig_ece').
+        fused predictor's numbers ('fused_acc', 'fused_ece', transfer rates)
+        and every same-family baseline it is judged against: 'orig_acc'
+        (view 0 alone), 'equal_acc' (equal-weight average), 'conf_acc'
+        (confidence-only weighting), 'agree_acc' (agreement-only weighting),
+        'view1_acc' (the single mildest-filtered view, no fusion),
+        'oracle_acc' (per-image upper bound), and 'orig_ece'.
     """
     labels = np.asarray(labels)
-    C, A, S = pre["C"], pre["A"], pre["S"]
-    if cfg.standardize:
-        C, A, S = analysis.zscore(C), analysis.zscore(A), analysis.zscore(S)
-
-    scores = analysis.reliability(C, A, S, cfg.alpha, cfg.beta, cfg.gamma)
-    w = analysis.fusion_weights(scores, tau=cfg.tau)
-    fused = analysis.fuse(pre["probs"], w)
+    fused = fused_probs(pre, cfg)
     fused_pred = top1(fused)
     fused_acc = accuracy(fused_pred, labels)
     if not full:
@@ -159,11 +180,16 @@ def score(pre, labels, cfg: FusionConfig, full=True):
     conf_only = analysis.fuse(
         pre["probs"], analysis.fusion_weights(pre["C"], tau=cfg.tau)
     )
+    agree_only = analysis.fuse(
+        pre["probs"], analysis.fusion_weights(pre["A"], tau=cfg.tau)
+    )
     row = {
         "n": int(len(labels)),
         "orig_acc": accuracy(orig_pred, labels),
         "equal_acc": accuracy(pre["equal_pred"], labels),
         "conf_acc": accuracy(top1(conf_only), labels),
+        "agree_acc": accuracy(top1(agree_only), labels),
+        "view1_acc": accuracy(top1(pre["probs"][:, 1]), labels),
         "fused_acc": fused_acc,
         "oracle_acc": float(np.mean((top1(pre["probs"]) == labels[:, None]).any(axis=1))),
         "orig_ece": ece(pre["orig"], labels),
@@ -175,4 +201,5 @@ def score(pre, labels, cfg: FusionConfig, full=True):
 
 def evaluate(probs_views, labels, cfg: FusionConfig):
     """'precompute' + 'score' in one call, for a quick one-off evaluation."""
-    return score(precompute(probs_views, m=cfg.m), labels, cfg, full=True)
+    return score(precompute(probs_views, m=cfg.m, agreement=cfg.agreement),
+                labels, cfg, full=True)

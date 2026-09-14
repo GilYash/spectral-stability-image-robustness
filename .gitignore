@@ -17,3 +17,6 @@ report/
 .idea/
 figures/
 cache_fixed/
+cache_combined/
+cache_combined_lite/
+cache_spatial/

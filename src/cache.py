@@ -109,6 +109,51 @@ def load_image(path):
     return TF.to_tensor(pil)
 
 
+def load_image_256(path):
+    """Load one image as a (3, 256, 256) float tensor in [0, 1].
+
+    Resize the short side to 256, centre-crop to a 256x256 square - the room
+    the spatial-TTA baseline needs for its corner crops. Cropping this square
+    to its own centre 224 reproduces 'load_image' exactly, so the spatial-TTA
+    view 0 matches the spectral profile's view 0.
+    """
+    pil = Image.open(path).convert("RGB")
+    pil = TF.center_crop(TF.resize(pil, 256), [256, 256])
+    return TF.to_tensor(pil)
+
+
+#: pixel offsets (top, left) of the four 224-crops inside a 256x256 image
+_CORNER_OFFSETS = ((0, 0), (0, 32), (32, 0), (32, 32))
+
+
+def spatial_views(images256, crop=224):
+    """Build an 8-view spatial-TTA stack: crop position + horizontal flip.
+
+    The 'equal view count' spatial-augmentation baseline the proposal asks
+    for, sized to match the K+1=8 views of the spectral ladder: the centre
+    crop (== the spectral profile's view 0) and its flip, the four corner
+    crops, and two of their flips.
+
+    Args:
+        images256: (B, 3, 256, 256) tensor in [0, 1].
+        crop: crop size (224, matching the spectral views).
+
+    Returns:
+        (B, 8, 3, crop, crop) tensor in [0, 1]; view 0 is the plain centre
+        crop (the same geometry as every other view in this project).
+    """
+    h, w = images256.shape[-2:]
+    cy, cx = (h - crop) // 2, (w - crop) // 2
+    center = images256[:, :, cy:cy + crop, cx:cx + crop]
+    corners = [images256[:, :, t:t + crop, l:l + crop] for t, l in _CORNER_OFFSETS]
+    tl, tr, bl, br = corners
+
+    views = [center, torch.flip(center, dims=[-1]),
+             tl, tr, bl, br,
+             torch.flip(tl, dims=[-1]), torch.flip(br, dims=[-1])]
+    return torch.stack(views, dim=1)
+
+
 @torch.no_grad()
 def spectral_views(images, energies, bisect_iters=18):
     """Build the low-pass view stack and the per-image cutoffs, batched on GPU.
@@ -265,6 +310,31 @@ def compute_condition(model, image_paths, device, energies=ENERGIES,
     return probs, cutoffs
 
 
+@torch.no_grad()
+def compute_spatial_condition(model, image_paths, device, batch_size=64, workers=8):
+    """Compute the 8-view spatial-TTA profile for a list of images.
+
+    Same shape and geometry budget as 'compute_condition' (K+1=8 views per
+    image), but the views are crop/flip variants instead of low-pass filters -
+    the "spatial TTA with equal view count" baseline from the proposal.
+
+    Returns:
+        probs: (N, 8, 1000) float16 softmax outputs; view 0 is the plain
+        centre crop (matches view 0 of the spectral profile exactly).
+    """
+    n = len(image_paths)
+    probs = np.empty((n, 8, 1000), dtype=np.float16)
+
+    with ThreadPoolExecutor(workers) as pool:
+        for i in range(0, n, batch_size):
+            chunk = image_paths[i:i + batch_size]
+            batch = torch.stack(list(pool.map(load_image_256, chunk))).to(device)
+            views = spatial_views(batch)
+            p = view_probs(model, views)
+            probs[i:i + len(chunk)] = p.cpu().numpy().astype(np.float16)
+    return probs
+
+
 # --------------------------------------------------------------------------- #
 # disk io
 # --------------------------------------------------------------------------- #
@@ -294,19 +364,51 @@ def load_condition(model_name, corruption, severity):
     """Load one cached condition.
 
     Returns:
-        dict with 'probs' (N, K+1, 1000) float16, 'cutoffs' (N, K) float32,
-       'labels' (N,) int32, 'paths' (N,) str, 'energies' (K,) float32.
+        dict with 'probs' (N, K+1, 1000) float16, 'labels' (N,) int32,
+        'paths' (N,) str, and 'cutoffs' (N, K) float32 / 'energies' (K,)
+        float32 -- both None for a cache saved without a filter ladder (e.g.
+        the spatial-TTA or spectral+spatial combined caches, which reuse this
+        loader's schema but only carry probs/labels/paths).
     """
     d = np.load(condition_path(model_name, corruption, severity), allow_pickle=False)
     return {
         "probs": d["probs"],
-        "cutoffs": d["cutoffs"],
+        "cutoffs": d["cutoffs"] if "cutoffs" in d.files else None,
         "labels": d["labels"],
         "paths": d["paths"],
-        "energies": d["energies"],
+        "energies": d["energies"] if "energies" in d.files else None,
     }
 
 
 def has_condition(model_name, corruption, severity):
     """True if this condition has already been cached."""
     return condition_path(model_name, corruption, severity).exists()
+
+
+def save_spatial_condition(model_name, corruption, severity, *, probs, labels, paths):
+    """Write one spatial-TTA condition to a compressed .npz (see `compute_spatial_condition`).
+
+    No cutoffs/energies fields - the 8 views are crop/flip variants, not a
+    filter ladder. Point `CACHE_ROOT` at a spatial-only directory (e.g.
+    "cache_spatial") before calling, same convention as the "fixed" ladder.
+    """
+    out = condition_path(model_name, corruption, severity)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        out,
+        probs=probs,
+        labels=np.asarray(labels, dtype=np.int32),
+        paths=np.asarray([str(p) for p in paths]),
+    )
+    return out
+
+
+def load_spatial_condition(model_name, corruption, severity):
+    """Load one cached spatial-TTA condition.
+
+    Returns:
+        dict with 'probs' (N, 8, 1000) float16, 'labels' (N,) int32,
+        'paths' (N,) str.
+    """
+    d = np.load(condition_path(model_name, corruption, severity), allow_pickle=False)
+    return {"probs": d["probs"], "labels": d["labels"], "paths": d["paths"]}

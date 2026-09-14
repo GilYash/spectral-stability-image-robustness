@@ -30,7 +30,8 @@ scripts use it by default, so normally there is nothing to do here.
 python scripts/build_subset.py
 ```
 
-Picks 100 classes with a fixed random seed, so everyone who runs this gets the
+Picks 100 of the 1000 ImageNet classes uniformly at random (seed 0, no
+stratification by category or difficulty), so everyone who runs this gets the
 same 100, and writes them to `data/subset_classes.json`. Every other step reads
 that file. It is committed to the repository, so you only need this step if you
 want to change the selection.

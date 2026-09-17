@@ -20,3 +20,7 @@ cache_fixed/
 cache_combined/
 cache_combined_lite/
 cache_spatial/
+/results_ablation_fresh
+/logs
+/cache_geometric_fresh
+/cache_fixed_fresh

@@ -81,6 +81,15 @@ def ece(probs2d, labels, n_bins=15):
     return float(e)
 
 
+
+
+def nll(probs2d, labels, eps=1e-12):
+    """Mean negative log-likelihood of the true class (natural-log units)."""
+    probs2d = np.asarray(probs2d, dtype=np.float64)
+    labels = np.asarray(labels, dtype=np.int64)
+    p_true = probs2d[np.arange(len(labels)), labels]
+    return float(-np.mean(np.log(np.clip(p_true, eps, 1.0))))
+
 def transfer_rates(orig_pred, new_pred, labels):
     """How a new predictor moves images relative to the unfiltered view.
 
@@ -194,6 +203,8 @@ def score(pre, labels, cfg: FusionConfig, full=True):
         "oracle_acc": float(np.mean((top1(pre["probs"]) == labels[:, None]).any(axis=1))),
         "orig_ece": ece(pre["orig"], labels),
         "fused_ece": ece(fused, labels),
+        "orig_nll": nll(pre["orig"], labels),
+        "fused_nll": nll(fused, labels),
     }
     row.update(transfer_rates(orig_pred, fused_pred, labels))
     return row

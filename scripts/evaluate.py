@@ -39,7 +39,8 @@ from src.splits import CORRUPTION_FAMILY, FAMILIES, tune_test_masks
 ROW_FIELDS = ["model", "corruption", "family", "severity", "n",
               "orig_acc", "equal_acc", "conf_acc", "agree_acc", "view1_acc",
               "fused_acc", "oracle_acc",
-              "orig_ece", "fused_ece", "negative_transfer", "positive_transfer"]
+              "orig_ece", "fused_ece", "orig_nll", "fused_nll",
+              "negative_transfer", "positive_transfer"]
 
 
 def latest_tuning(model_name, tag=None):
@@ -183,7 +184,8 @@ def _report(model_name, rows, clean_row, out_dir, stamp, tag=None):
                 per_corr[c] = {k: _mean(cr, k) for k in
                                ("orig_acc", "equal_acc", "conf_acc", "agree_acc",
                                 "view1_acc", "fused_acc", "oracle_acc",
-                                "negative_transfer", "fused_ece")}
+                                "negative_transfer", "fused_ece", "orig_nll",
+                                "fused_nll")}
 
     summary = {
         "model": model_name,
@@ -200,6 +202,8 @@ def _report(model_name, rows, clean_row, out_dir, stamp, tag=None):
         "mean_negative_transfer": _mean(rows, "negative_transfer"),
         "mean_fused_ece": _mean(rows, "fused_ece"),
         "mean_orig_ece": _mean(rows, "orig_ece"),
+        "mean_fused_nll": _mean(rows, "fused_nll"),
+        "mean_orig_nll": _mean(rows, "orig_nll"),
         "worst_corruption": min(per_corr, key=lambda c: per_corr[c]["fused_acc"]) if per_corr else None,
         "per_corruption": per_corr,
     }
@@ -232,6 +236,7 @@ def _report(model_name, rows, clean_row, out_dir, stamp, tag=None):
     print(f"  fused - orig : {(summary['mCA_fused']-summary['mCA_orig'])*100:+.1f} pts")
     print(f"  worst corruption (fused): {summary['worst_corruption']}")
     print(f"  ECE  orig {summary['mean_orig_ece']:.3f} -> fused {summary['mean_fused_ece']:.3f}")
+    print(f"  NLL  orig {summary['mean_orig_nll']:.3f} -> fused {summary['mean_fused_nll']:.3f}")
     print(f"  saved {csv_path}  and  {json_path}")
 
 

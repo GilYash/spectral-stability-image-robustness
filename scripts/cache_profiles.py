@@ -5,7 +5,8 @@
     python scripts/cache_profiles.py                       # both models, all 15 + clean
     python scripts/cache_profiles.py --models resnet18 --corruptions gaussian_noise fog
     python scripts/cache_profiles.py --n-per-class 25      # half the images, half the time
-    python scripts/cache_profiles.py --ladder fixed --cache-dir cache_fixed   # alternate view family
+    python scripts/cache_profiles.py --ladder fixed --cache-dir cache_fixed
+    python scripts/cache_profiles.py --ladder geometric --cache-dir cache_geometric
 
 Re-run any time: conditions already cached are skipped unless --overwrite.
 """
@@ -48,10 +49,10 @@ def main():
                     help="images per GPU batch (lower it if DeiT runs out of memory)")
     ap.add_argument("--overwrite", action="store_true",
                     help="recompute conditions that are already cached")
-    ap.add_argument("--ladder", choices=["energy", "fixed"], default="energy",
-                    help="energy: per-image adaptive cutoffs (default). "
-                         "fixed: same absolute cutoffs for every image "
-                         "(see src/cache.py spectral_views_fixed)")
+    ap.add_argument("--ladder", choices=["energy", "fixed", "geometric"], default="energy",
+                    help="energy: per-image adaptive cutoffs (default); "
+                         "fixed: hand-spaced absolute cutoffs; "
+                         "geometric: same endpoints/K as fixed with constant-ratio spacing")
     ap.add_argument("--cache-dir", default="cache",
                     help="where to write the cache (use a different dir per ladder)")
     args = ap.parse_args()
@@ -93,6 +94,8 @@ def main():
             out = cache.save_condition(
                 model_name, corr, sev,
                 probs=probs, cutoffs=cutoffs, labels=labels, paths=paths,
+                energies=(cache.ENERGIES if args.ladder == "energy" else None),
+                ladder=args.ladder,
             )
             orig_acc = (probs.astype(np.float32)[:, 0].argmax(-1) == labels).mean()
             size_mb = out.stat().st_size / 1e6

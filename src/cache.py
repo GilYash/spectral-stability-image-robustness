@@ -5,7 +5,8 @@ that is NumPy over these arrays -- see src/analysis.py, src/metrics.py.
 Two view families (ladders) are supported, selected by scripts/cache_profiles.py
 --ladder and written to separate cache roots so they never mix:
     energy  (default) per-image adaptive cutoffs -- see `spectral_views`
-    fixed   the same absolute cutoffs for every image -- see `spectral_views_fixed`
+    fixed   the same absolute hand-spaced cutoffs for every image
+    geometric the same endpoints/K as fixed, but constant-ratio spacing
 
 Layout (CACHE_ROOT is set by the caller, e.g. "cache" or "cache_fixed"):
     <CACHE_ROOT>/<model>/<corruption>/<severity>.npz
@@ -40,6 +41,19 @@ ENERGIES = (0.99, 0.98, 0.97, 0.96, 0.95, 0.94, 0.93)
 #: solving per image for a target energy fraction. See the "fixed" ladder note
 #: below `compute_condition` for why this exists.
 FIXED_CUTOFFS = (0.9, 0.75, 0.6, 0.45, 0.3, 0.2, 0.12)
+
+#: Geometric alternative with the same endpoints and number of views as
+#: FIXED_CUTOFFS.  The ratio is (0.12 / 0.9) ** (1 / 6) ~= 0.715.
+#: Keeping endpoints and K fixed makes fixed-vs-geometric a clean ablation:
+#: only the spacing of the spectral views changes.
+GEOMETRIC_CUTOFFS = tuple(
+    float(x) for x in np.geomspace(FIXED_CUTOFFS[0], FIXED_CUTOFFS[-1], len(FIXED_CUTOFFS))
+)
+
+LADDER_CUTOFFS = {
+    "fixed": FIXED_CUTOFFS,
+    "geometric": GEOMETRIC_CUTOFFS,
+}
 
 #: ImageNet normalisation constants - the same for ResNet-18 and DeiT-Tiny.
 MEAN = (0.485, 0.456, 0.406)
@@ -188,7 +202,9 @@ def spectral_views(images, energies, bisect_iters=18):
 
     def kept_fraction(cutoff):
         m = mask(cutoff)[:, None]                             # (B,1,H,W)
-        return (power * m).sum(dim=(-3, -2, -1)) / total      # (B,)
+        # m multiplies the Fourier amplitude, so retained *energy* scales
+        # with m**2.  Using power*m would overestimate retained energy.
+        return (power * m.square()).sum(dim=(-3, -2, -1)) / total  # (B,)
 
     views = [images]
     cutoffs = []
@@ -279,9 +295,9 @@ def compute_condition(model, image_paths, device, energies=ENERGIES,
             output) - the actual cutoffs are `FIXED_CUTOFFS`.
         batch_size: images per GPU batch (lower for DeiT if memory is tight).
         workers: threads for image loading.
-        ladder: "energy" (per-image adaptive, the original design) or "fixed"
-            (same absolute cutoffs for every image - see
-            `spectral_views_fixed` for why this exists).
+        ladder: "energy" (per-image adaptive, the original design), "fixed"
+            (same hand-spaced absolute cutoffs for every image), or "geometric"
+            (same endpoints/K as fixed, constant-ratio spacing).
 
     Returns:
         (probs, cutoffs): probs (N, K+1, 1000) float16 softmax outputs,
@@ -292,15 +308,20 @@ def compute_condition(model, image_paths, device, energies=ENERGIES,
     n = len(image_paths)
     probs = np.empty((n, k + 1, 1000), dtype=np.float16)
     cutoffs = np.empty((n, k), dtype=np.float32)
-    if ladder == "fixed":
-        fixed = np.asarray(FIXED_CUTOFFS[:k], dtype=np.float32)
+    if ladder in LADDER_CUTOFFS:
+        ladder_cutoffs = tuple(LADDER_CUTOFFS[ladder][:k])
+        fixed = np.asarray(ladder_cutoffs, dtype=np.float32)
+    elif ladder != "energy":
+        raise ValueError(
+            f"unknown ladder {ladder!r}; expected 'energy', 'fixed', or 'geometric'"
+        )
 
     with ThreadPoolExecutor(workers) as pool:
         for i in range(0, n, batch_size):
             chunk = image_paths[i:i + batch_size]
             batch = torch.stack(list(pool.map(load_image, chunk))).to(device)
-            if ladder == "fixed":
-                views = spectral_views_fixed(batch, FIXED_CUTOFFS[:k])
+            if ladder in LADDER_CUTOFFS:
+                views = spectral_views_fixed(batch, ladder_cutoffs)
                 cutoffs[i:i + len(chunk)] = fixed
             else:
                 views, cut = spectral_views(batch, energies)
@@ -345,18 +366,27 @@ def condition_path(model_name, corruption, severity):
 
 
 def save_condition(model_name, corruption, severity, *, probs, cutoffs, labels,
-                   paths, energies=ENERGIES):
-    """Write one condition to a compressed .npz. Returns the path written."""
+                   paths, energies=ENERGIES, ladder=None):
+    """Write one condition to a compressed .npz. Returns the path written.
+
+    `energies` is meaningful only for the adaptive energy ladder.  Fixed and
+    geometric caches can pass energies=None; their actual per-view cutoffs are
+    already stored in `cutoffs`.  `ladder` is optional metadata and does not
+    affect older readers.
+    """
     out = condition_path(model_name, corruption, severity)
     out.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(
-        out,
+    payload = dict(
         probs=probs,
         cutoffs=cutoffs,
         labels=np.asarray(labels, dtype=np.int32),
         paths=np.asarray([str(p) for p in paths]),
-        energies=np.asarray(energies, dtype=np.float32),
     )
+    if energies is not None:
+        payload["energies"] = np.asarray(energies, dtype=np.float32)
+    if ladder is not None:
+        payload["ladder"] = np.asarray(str(ladder))
+    np.savez_compressed(out, **payload)
     return out
 
 
@@ -377,6 +407,7 @@ def load_condition(model_name, corruption, severity):
         "labels": d["labels"],
         "paths": d["paths"],
         "energies": d["energies"] if "energies" in d.files else None,
+        "ladder": str(d["ladder"]) if "ladder" in d.files else None,
     }
 
 

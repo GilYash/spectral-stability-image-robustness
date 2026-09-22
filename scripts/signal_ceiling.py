@@ -1,7 +1,7 @@
 """How much of the oracle gap is reachable from C/A/S alone?
 
-Fast implementation: every cached condition is loaded once and its C/A/S
-signals are computed once with the same torch/CUDA JSD backend used by the fast
+Optimized implementation: every cached condition is loaded once and its C/A/S
+signals are computed once with the same torch/CUDA JSD backend used by the GPU
 tuner.  The four leave-one-family-out folds then reuse those features.  The
 scikit-learn fits remain CPU work by design; use --no-gbm when only the linear
 ceiling is needed.
@@ -23,10 +23,10 @@ from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
 
 from src import analysis, cache
-from src.fast_eval import device_from_arg
+from src.evaluation import device_from_arg
 from src.metrics import accuracy, top1
 from src.splits import CORRUPTION_FAMILY, leave_one_family_out, tune_test_masks
-from scripts.tune_fusion_fast import signal_variants_torch
+from src.evaluation import signal_variants_torch
 
 
 def precompute_conditions(

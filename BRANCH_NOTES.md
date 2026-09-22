@@ -2,6 +2,8 @@
 
 This file summarizes only the work added on this branch. The original project documentation remains in `README.md`, `RESULTS.md`, `data/README.md`, `scripts/README.md`, and `src/README.md`.
 
+The original README files are intentionally preserved unchanged. Their command names remain valid; on this branch, the stable filenames such as `tune_fusion.py` and `evaluate.py` now contain the optimized implementations described below.
+
 ## Overview
 
 This branch keeps the original spectral-stability method and evaluation protocol, but makes the experimental pipeline substantially faster and adds a more complete set of tuning and statistical checks.

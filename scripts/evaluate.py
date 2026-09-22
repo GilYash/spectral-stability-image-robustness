@@ -33,7 +33,7 @@ import numpy as np
 
 from src import cache
 from src.metrics import FusionConfig
-from src.fast_eval import device_from_arg, score_many_torch
+from src.evaluation import device_from_arg, score_many_torch
 from src.splits import CORRUPTION_FAMILY, FAMILIES, tune_test_masks
 
 #: columns of the per-condition CSV
@@ -44,20 +44,24 @@ ROW_FIELDS = ["model", "corruption", "family", "severity", "n",
               "negative_transfer", "positive_transfer"]
 
 
-def latest_tuning(model_name, tag=None):
-    """Path of the newest matching tuning json, or exit if there is none.
+def latest_tuning(model_name, tag=None, results_dir="results"):
+    """Return the newest tuning JSON for this model/cache tag.
 
-    Matches tune_fusion.py's naming: `tuning_<model>[_<tag>]_<timestamp>.json`.
-    Filtering by `tag` (the cache dir a tuning run was built against, e.g.
-    "cache_fixed") stops --tuning auto from picking a config tuned on a
-    different view family than the one this run's --cache-dir reads.
+    Final tuning files are named ``tuning_grid_*`` or ``tuning_ce*``.  The
+    broader glob also accepts development-era tuning files so old local result
+    directories remain usable after the repository cleanup.
     """
-    pattern = (f"results/tuning_{model_name}_{tag}_*.json" if tag
-              else f"results/tuning_{model_name}_2*.json")  # no tag -> timestamp only
-    files = sorted(glob.glob(pattern))
+    root = Path(results_dir)
+    if tag:
+        patterns = [root / f"tuning_*_{model_name}_{tag}_*.json"]
+    else:
+        patterns = [root / f"tuning_*_{model_name}_*.json"]
+    files = []
+    for pattern in patterns:
+        files.extend(glob.glob(str(pattern)))
     if not files:
-        raise SystemExit(f"--tuning auto: no {pattern} found")
-    return files[-1]
+        raise SystemExit(f"--tuning auto: no tuning JSON found for {model_name} tag={tag!r} in {root}")
+    return max(files, key=lambda x: Path(x).stat().st_mtime)
 
 
 def config_picker(args, model_name, tag=None):
@@ -135,7 +139,7 @@ def main():
     for model_name in args.models:
         pick, src = config_picker(args, model_name, tag)
         print(f"\n=== {model_name}  (config: {src}) ===")
-        print(f"  fast evaluation device: {device}")
+        print(f"  evaluation device: {device}")
 
         rows = []
         for corruption in CORRUPTION_FAMILY:

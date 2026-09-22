@@ -1,4 +1,4 @@
-"""Paired-bootstrap the refined spectral candidates before freezing the final method.
+"""Paired-bootstrap spectral candidates before freezing the final method.
 
 Console output is concise by default: one line per completed comparison plus the
 final output paths. Use --verbose to restore child-command and per-condition logs.
@@ -65,9 +65,17 @@ def get_record(records, model, ladder, method):
 
 
 def comparison_set(records, model):
-    final = get_record(records, model, "fixed", "ce_refined_bias")
-    fixed_grid = get_record(records, model, "fixed", "grid")
-    geometric_bias = get_record(records, model, "geometric", "ce_refined_bias")
+    # Accept both the cleaned method names and old development-result names.
+    def one_of(ladder, methods):
+        for method in methods:
+            matches = [r for r in records if key(r) == (model, ladder, method)]
+            if len(matches) == 1:
+                return matches[0]
+        raise RuntimeError(f"missing record for {model}/{ladder}/{methods}")
+
+    final = one_of("fixed", ["ce_bias", "ce_refined_bias"])
+    fixed_grid = one_of("fixed", ["grid"])
+    geometric_bias = one_of("geometric", ["ce_bias", "ce_refined_bias"])
 
     excluded = {id(final), id(fixed_grid), id(geometric_bias)}
     remaining = [r for r in records if r["model"] == model and id(r) not in excluded]
@@ -83,7 +91,7 @@ def comparison_set(records, model):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--summary", required=True,
-                    help="refined_ablation_*.json produced by run_refined_ablation.py")
+                    help="ablation_summary_*.json produced by run_ablation.py")
     ap.add_argument("--out", default="results_selection")
     ap.add_argument("--models", nargs="+", default=["resnet18", "deit"],
                     choices=["resnet18", "deit"])
@@ -98,7 +106,7 @@ def main():
 
     records = json.loads(Path(args.summary).read_text(encoding="utf-8"))
     if not isinstance(records, list):
-        raise SystemExit("summary JSON must contain the refined-ablation record list")
+        raise SystemExit("summary JSON must contain the ablation record list")
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)

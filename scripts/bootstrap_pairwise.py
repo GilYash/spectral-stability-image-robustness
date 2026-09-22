@@ -1,4 +1,4 @@
-"""Fast paired bootstrap for any two cached predictors.
+"""Paired bootstrap for any two cached predictors.
 
 Optimizations over the original script:
 - if A and B use the same cache, each condition is loaded only once;
@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 
 from src import cache
-from src.fast_eval import device_from_arg, fused_correct_many_torch
+from src.evaluation import device_from_arg, fused_correct_many_torch
 from src.metrics import FusionConfig
 from src.splits import CORRUPTION_FAMILY, tune_test_masks
 

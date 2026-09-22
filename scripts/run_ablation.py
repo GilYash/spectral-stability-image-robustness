@@ -28,11 +28,6 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
-
-if hasattr(sys.stderr, "reconfigure"):
-    sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")
 
 def latest(pattern):
     files = sorted(glob.glob(str(pattern)))
@@ -130,8 +125,17 @@ def row_from_eval(model, ladder, fitter, cache_dir, tuning_path, eval_path):
         "alpha_global": cfg.get("alpha"),
         "beta_global": cfg.get("beta"),
         "gamma_global": cfg.get("gamma"),
+        "tau_global": cfg.get("tau", 1.0),
+        "alpha_over_tau_global": (cfg.get("alpha") / cfg.get("tau", 1.0)
+                                  if cfg.get("alpha") is not None else None),
+        "beta_over_tau_global": (cfg.get("beta") / cfg.get("tau", 1.0)
+                                 if cfg.get("beta") is not None else None),
+        "gamma_over_tau_global": (cfg.get("gamma") / cfg.get("tau", 1.0)
+                                  if cfg.get("gamma") is not None else None),
         "m_global": cfg.get("m"),
         "agreement_global": cfg.get("agreement"),
+        "held_out_configs": {k: v.get("config", {}) for k, v in t.get("held_out", {}).items()},
+        "config_note": "corrupted evaluation uses family-specific held-out configs; global is used for clean",
         "mCA_orig": e.get("mCA_orig"),
         "mCA_fused": e.get("mCA_fused"),
         "gain_pts": (100.0 * (e["mCA_fused"] - e["mCA_orig"])

@@ -47,6 +47,8 @@ def main():
     ap.add_argument("--subset", default="data/subset_classes.json")
     ap.add_argument("--n-per-class", type=int, default=None)
     ap.add_argument("--batch-size", type=int, default=64)
+    ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--prefetch-batches", type=int, default=2)
     ap.add_argument("--overwrite", action="store_true")
     ap.add_argument("--cache-dir", default="cache_spatial")
     args = ap.parse_args()
@@ -84,6 +86,7 @@ def main():
             t0 = time.time()
             probs = cache.compute_spatial_condition(
                 model, paths, device, batch_size=args.batch_size,
+                workers=args.workers, prefetch_batches=args.prefetch_batches,
             )
             out = cache.save_spatial_condition(
                 model_name, corr, sev, probs=probs, labels=labels, paths=paths,

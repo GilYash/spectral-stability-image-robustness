@@ -47,6 +47,10 @@ def main():
                     help="cap images per class (default: all ~50)")
     ap.add_argument("--batch-size", type=int, default=64,
                     help="images per GPU batch (lower it if DeiT runs out of memory)")
+    ap.add_argument("--workers", type=int, default=8,
+                    help="JPEG decode/resize worker threads")
+    ap.add_argument("--prefetch-batches", type=int, default=2,
+                    help="CPU image batches loaded ahead while GPU is busy")
     ap.add_argument("--overwrite", action="store_true",
                     help="recompute conditions that are already cached")
     ap.add_argument("--ladder", choices=["energy", "fixed", "geometric"], default="energy",
@@ -90,6 +94,7 @@ def main():
             t0 = time.time()
             probs, cutoffs = cache.compute_condition(
                 model, paths, device, batch_size=args.batch_size, ladder=args.ladder,
+                workers=args.workers, prefetch_batches=args.prefetch_batches,
             )
             out = cache.save_condition(
                 model_name, corr, sev,

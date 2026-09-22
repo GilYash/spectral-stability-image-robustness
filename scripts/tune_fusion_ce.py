@@ -70,7 +70,8 @@ def grid_theta_start(grid_record, held_family=None):
         entry = (grid_record["global"] if held_family is None
                  else grid_record["held_out"][held_family])
         c = entry["config"]
-        return np.array([c["alpha"], c["beta"], c["gamma"]], dtype=float)
+        tau = float(c.get("tau", 1.0))
+        return np.array([c["alpha"], c["beta"], c["gamma"]], dtype=float) / tau
     except (KeyError, TypeError):
         return None
 

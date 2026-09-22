@@ -32,7 +32,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 
 from src import cache
-from src.metrics import FusionConfig, precompute, score
+from src.metrics import FusionConfig
+from src.fast_eval import device_from_arg, score_many_torch
 from src.splits import CORRUPTION_FAMILY, FAMILIES, tune_test_masks
 
 #: columns of the per-condition CSV
@@ -116,6 +117,11 @@ def main():
     ap.add_argument("--tag", default=None,
                     help="suffix for the output filename, e.g. the ladder name; "
                          "defaults to the cache dir name when it isn't 'cache'")
+    ap.add_argument("--device", default="auto",
+                    help="torch device for signal/fusion evaluation (default: auto)")
+    ap.add_argument("--signal-chunk", type=int, default=256)
+    ap.add_argument("--signal-pair-batch", type=int, default=32)
+    ap.add_argument("--quiet-progress", action="store_true")
     args = ap.parse_args()
 
     cache.CACHE_ROOT = Path(args.cache_dir)
@@ -125,9 +131,11 @@ def main():
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    device = device_from_arg(args.device)
     for model_name in args.models:
         pick, src = config_picker(args, model_name, tag)
         print(f"\n=== {model_name}  (config: {src}) ===")
+        print(f"  fast evaluation device: {device}")
 
         rows = []
         for corruption in CORRUPTION_FAMILY:
@@ -140,21 +148,29 @@ def main():
                 else:
                     mask = np.ones(len(d["labels"]), dtype=bool)
                 cfg = pick(corruption)
-                r = score(precompute(d["probs"][mask], m=cfg.m, agreement=cfg.agreement,
-                                    ladder_len=args.ladder_len),
-                          d["labels"][mask], cfg, full=True)
+                r = score_many_torch(
+                    d["probs"][mask], d["labels"][mask], {"method": cfg},
+                    ladder_len=args.ladder_len, device=device,
+                    signal_chunk=args.signal_chunk,
+                    signal_pair_batch=args.signal_pair_batch,
+                )["method"]
                 r.update(model=model_name, corruption=corruption,
                          family=CORRUPTION_FAMILY[corruption], severity=sev)
                 rows.append(r)
+                if not args.quiet_progress:
+                    print(f"  {corruption:18s}/{sev}: fused {100*r['fused_acc']:.2f}%")
 
         # clean (always all images)
         clean_row = None
         if cache.has_condition(model_name, "clean", 0):
             d = cache.load_condition(model_name, "clean", 0)
             cfg = pick("clean")
-            clean_row = score(precompute(d["probs"], m=cfg.m, agreement=cfg.agreement,
-                                        ladder_len=args.ladder_len),
-                              d["labels"], cfg, full=True)
+            clean_row = score_many_torch(
+                d["probs"], d["labels"], {"method": cfg},
+                ladder_len=args.ladder_len, device=device,
+                signal_chunk=args.signal_chunk,
+                signal_pair_batch=args.signal_pair_batch,
+            )["method"]
 
         _report(model_name, rows, clean_row, out_dir, stamp, tag)
 
@@ -238,6 +254,7 @@ def _report(model_name, rows, clean_row, out_dir, stamp, tag=None):
     print(f"  ECE  orig {summary['mean_orig_ece']:.3f} -> fused {summary['mean_fused_ece']:.3f}")
     print(f"  NLL  orig {summary['mean_orig_nll']:.3f} -> fused {summary['mean_fused_nll']:.3f}")
     print(f"  saved {csv_path}  and  {json_path}")
+    return csv_path, json_path
 
 
 if __name__ == "__main__":

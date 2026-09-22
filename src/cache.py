@@ -20,6 +20,7 @@ Each .npz holds:
     energies  (K,)           float32    the energy ladder targets
 """
 from concurrent.futures import ThreadPoolExecutor
+from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -279,9 +280,52 @@ def view_probs(model, views):
     return torch.softmax(logits, dim=-1).reshape(b, k1, -1)
 
 
+
+
+def _prefetched_image_batches(image_paths, loader, batch_size, workers=8, prefetch_batches=2, pin_memory=False):
+    """Yield CPU image batches while loading future batches in background threads.
+
+    The old cache loop called ``pool.map`` only after the previous GPU batch had
+    finished, so JPEG decode/resize and GPU inference alternated instead of
+    overlapping.  Here up to ``prefetch_batches`` future batches are already in
+    flight while the caller processes the current one.  Image order and the
+    exact loader function are unchanged.
+    """
+    if workers < 1:
+        raise ValueError("workers must be >= 1")
+    if prefetch_batches < 0:
+        raise ValueError("prefetch_batches must be >= 0")
+    n = len(image_paths)
+    with ThreadPoolExecutor(workers) as pool:
+        pending = deque()
+        next_i = 0
+
+        def submit_one(i):
+            chunk = image_paths[i:i + batch_size]
+            futures = [pool.submit(loader, p) for p in chunk]
+            pending.append((i, len(chunk), futures))
+
+        # Current batch + bounded look-ahead.
+        for _ in range(prefetch_batches + 1):
+            if next_i >= n:
+                break
+            submit_one(next_i)
+            next_i += batch_size
+
+        while pending:
+            i, count, futures = pending.popleft()
+            batch = torch.stack([f.result() for f in futures])
+            if pin_memory:
+                batch = batch.pin_memory()
+            if next_i < n:
+                submit_one(next_i)
+                next_i += batch_size
+            yield i, count, batch
+
+
 @torch.no_grad()
 def compute_condition(model, image_paths, device, energies=ENERGIES,
-                      batch_size=64, workers=8, ladder="energy"):
+                      batch_size=64, workers=8, ladder="energy", prefetch_batches=2):
     """Compute the full profile array for a list of images.
 
     ~4-5 ms/image on an A10 (batched forward, GPU filtering, threaded loading).
@@ -316,23 +360,26 @@ def compute_condition(model, image_paths, device, energies=ENERGIES,
             f"unknown ladder {ladder!r}; expected 'energy', 'fixed', or 'geometric'"
         )
 
-    with ThreadPoolExecutor(workers) as pool:
-        for i in range(0, n, batch_size):
-            chunk = image_paths[i:i + batch_size]
-            batch = torch.stack(list(pool.map(load_image, chunk))).to(device)
-            if ladder in LADDER_CUTOFFS:
-                views = spectral_views_fixed(batch, ladder_cutoffs)
-                cutoffs[i:i + len(chunk)] = fixed
-            else:
-                views, cut = spectral_views(batch, energies)
-                cutoffs[i:i + len(chunk)] = cut.cpu().numpy()
-            p = view_probs(model, views)
-            probs[i:i + len(chunk)] = p.cpu().numpy().astype(np.float16)
+    pin = torch.device(device).type == "cuda"
+    for i, count, batch_cpu in _prefetched_image_batches(
+        image_paths, load_image, batch_size, workers=workers,
+        prefetch_batches=prefetch_batches, pin_memory=pin,
+    ):
+        batch = batch_cpu.to(device, non_blocking=pin)
+        if ladder in LADDER_CUTOFFS:
+            views = spectral_views_fixed(batch, ladder_cutoffs)
+            cutoffs[i:i + count] = fixed
+        else:
+            views, cut = spectral_views(batch, energies)
+            cutoffs[i:i + count] = cut.cpu().numpy()
+        p = view_probs(model, views)
+        probs[i:i + count] = p.cpu().numpy().astype(np.float16)
     return probs, cutoffs
 
 
 @torch.no_grad()
-def compute_spatial_condition(model, image_paths, device, batch_size=64, workers=8):
+def compute_spatial_condition(model, image_paths, device, batch_size=64, workers=8,
+                              prefetch_batches=2):
     """Compute the 8-view spatial-TTA profile for a list of images.
 
     Same shape and geometry budget as 'compute_condition' (K+1=8 views per
@@ -346,13 +393,15 @@ def compute_spatial_condition(model, image_paths, device, batch_size=64, workers
     n = len(image_paths)
     probs = np.empty((n, 8, 1000), dtype=np.float16)
 
-    with ThreadPoolExecutor(workers) as pool:
-        for i in range(0, n, batch_size):
-            chunk = image_paths[i:i + batch_size]
-            batch = torch.stack(list(pool.map(load_image_256, chunk))).to(device)
-            views = spatial_views(batch)
-            p = view_probs(model, views)
-            probs[i:i + len(chunk)] = p.cpu().numpy().astype(np.float16)
+    pin = torch.device(device).type == "cuda"
+    for i, count, batch_cpu in _prefetched_image_batches(
+        image_paths, load_image_256, batch_size, workers=workers,
+        prefetch_batches=prefetch_batches, pin_memory=pin,
+    ):
+        batch = batch_cpu.to(device, non_blocking=pin)
+        views = spatial_views(batch)
+        p = view_probs(model, views)
+        probs[i:i + count] = p.cpu().numpy().astype(np.float16)
     return probs
 
 
@@ -408,6 +457,8 @@ def load_condition(model_name, corruption, severity):
         "paths": d["paths"],
         "energies": d["energies"] if "energies" in d.files else None,
         "ladder": str(d["ladder"]) if "ladder" in d.files else None,
+        "ladder_len": int(d["ladder_len"]) if "ladder_len" in d.files else None,
+        "view_names": d["view_names"] if "view_names" in d.files else None,
     }
 
 
@@ -416,30 +467,69 @@ def has_condition(model_name, corruption, severity):
     return condition_path(model_name, corruption, severity).exists()
 
 
-def save_spatial_condition(model_name, corruption, severity, *, probs, labels, paths):
-    """Write one spatial-TTA condition to a compressed .npz (see `compute_spatial_condition`).
+def save_spatial_condition(model_name, corruption, severity, *, probs, labels, paths,
+                           cutoffs=None, ladder=None, ladder_len=None, view_names=None):
+    """Write a generic multi-view cache condition.
 
-    No cutoffs/energies fields - the 8 views are crop/flip variants, not a
-    filter ladder. Point `CACHE_ROOT` at a spatial-only directory (e.g.
-    "cache_spatial") before calling, same convention as the "fixed" ladder.
+    Spatial-only caches normally omit the optional metadata.  Combined caches
+    should preserve the spectral ladder metadata so downstream reporting can
+    label views from the cache rather than hard-coding fixed cutoffs.
     """
     out = condition_path(model_name, corruption, severity)
     out.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(
-        out,
+    payload = dict(
         probs=probs,
         labels=np.asarray(labels, dtype=np.int32),
         paths=np.asarray([str(p) for p in paths]),
     )
+    if cutoffs is not None:
+        payload["cutoffs"] = np.asarray(cutoffs)
+    if ladder is not None:
+        payload["ladder"] = np.asarray(str(ladder))
+    if ladder_len is not None:
+        payload["ladder_len"] = np.asarray(int(ladder_len), dtype=np.int32)
+    if view_names is not None:
+        payload["view_names"] = np.asarray([str(x) for x in view_names])
+    np.savez_compressed(out, **payload)
     return out
 
 
 def load_spatial_condition(model_name, corruption, severity):
-    """Load one cached spatial-TTA condition.
-
-    Returns:
-        dict with 'probs' (N, 8, 1000) float16, 'labels' (N,) int32,
-        'paths' (N,) str.
-    """
+    """Load one cached generic multi-view condition, including optional metadata."""
     d = np.load(condition_path(model_name, corruption, severity), allow_pickle=False)
-    return {"probs": d["probs"], "labels": d["labels"], "paths": d["paths"]}
+    return {
+        "probs": d["probs"],
+        "labels": d["labels"],
+        "paths": d["paths"],
+        "cutoffs": d["cutoffs"] if "cutoffs" in d.files else None,
+        "ladder": str(d["ladder"]) if "ladder" in d.files else None,
+        "ladder_len": int(d["ladder_len"]) if "ladder_len" in d.files else None,
+        "view_names": d["view_names"] if "view_names" in d.files else None,
+    }
+
+
+def profile_view_labels(record):
+    """Return human-readable view labels from cached metadata when available.
+
+    This avoids hard-coding fixed-ladder cutoffs in reporting scripts.  For an
+    adaptive ladder, where cutoffs vary by image, generic spectral labels are
+    returned instead of pretending one cutoff applies to every image.
+    """
+    if record.get("view_names") is not None:
+        return [str(x) for x in record["view_names"]]
+
+    n_views = int(record["probs"].shape[1])
+    labels = ["original"]
+    cutoffs = record.get("cutoffs")
+    if cutoffs is not None:
+        c = np.asarray(cutoffs)
+        if c.ndim == 2 and len(c) and np.allclose(c, c[:1]):
+            vals = c[0]
+            labels += [f"lowpass_{float(x):.6g}" for x in vals]
+        elif c.ndim == 1:
+            labels += [f"lowpass_{float(x):.6g}" for x in c]
+        else:
+            labels += [f"spectral_{i}" for i in range(1, min(n_views, 1 + c.shape[-1]))]
+    while len(labels) < n_views:
+        labels.append(f"view_{len(labels)}")
+    return labels[:n_views]

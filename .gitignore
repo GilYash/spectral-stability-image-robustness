@@ -24,3 +24,7 @@ cache_spatial/
 /logs
 /cache_geometric_fresh
 /cache_fixed_fresh
+/results_fast
+/results_fast_gpu_signals
+/results_refined
+/results_selection

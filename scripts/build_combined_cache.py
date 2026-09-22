@@ -80,7 +80,28 @@ def merge_condition(model_name, corruption, severity, spectral_dir, spatial_dir,
         [spec["probs"][:, :LADDER_LEN], spat_probs[:, list(spatial_views)]], axis=1
     ).astype(np.float16)
     assert combined.shape[1] == LADDER_LEN + len(list(spatial_views))
-    return combined, spec["labels"], spec["paths"]
+    # Preserve spectral metadata so downstream plots/evaluators can label the
+    # ladder correctly for either fixed or geometric caches.
+    cutoffs = spec.get("cutoffs")
+    ladder = spec.get("ladder")
+    view_names = ["original"]
+    if cutoffs is not None:
+        # Fixed/geometric cutoffs are identical for every image; adaptive energy
+        # caches may vary per image, so use generic spectral labels there.
+        first = np.asarray(cutoffs[0] if np.ndim(cutoffs) == 2 else cutoffs)
+        if np.ndim(cutoffs) == 2 and np.allclose(cutoffs, cutoffs[:1]):
+            view_names += [f"lowpass_{x:.6g}" for x in first]
+        else:
+            view_names += [f"spectral_{i}" for i in range(1, LADDER_LEN)]
+    else:
+        view_names += [f"spectral_{i}" for i in range(1, LADDER_LEN)]
+    spatial_names = [
+        "hflip", "top_left", "top_right", "bottom_left", "bottom_right",
+        "top_left_hflip", "bottom_right_hflip",
+    ]
+    selected_names = [spatial_names[i - 1] for i in spatial_views]
+    view_names += selected_names
+    return combined, spec["labels"], spec["paths"], cutoffs, ladder, view_names
 
 
 def main():
@@ -125,11 +146,14 @@ def main():
             if merged is None:
                 print(f"  --  {corr}/{sev}: missing in one of the source caches")
                 continue
-            probs, labels, paths = merged
+            probs, labels, paths, cutoffs, ladder, view_names = merged
 
             cache.CACHE_ROOT = out_dir
-            out = cache.save_spatial_condition(  # generic probs+labels+paths schema
-                model_name, corr, sev, probs=probs, labels=labels, paths=paths,
+            out = cache.save_spatial_condition(
+                model_name, corr, sev,
+                probs=probs, labels=labels, paths=paths,
+                cutoffs=cutoffs, ladder=ladder, ladder_len=LADDER_LEN,
+                view_names=view_names,
             )
             orig_acc = (probs.astype(np.float32)[:, 0].argmax(-1) == labels).mean()
             print(f"  ok  {corr}/{sev}: {len(paths):5d} imgs  "

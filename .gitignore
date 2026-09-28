@@ -9,7 +9,6 @@ data/*
 !data/subset_classes.json
 .ipynb_checkpoints/
 .venv/
-results/
 report/
 *.tar
 .vscode/
@@ -28,3 +27,10 @@ cache_spatial/
 /results_fast_gpu_signals
 /results_refined
 /results_selection
+/cache_combined_recheck
+/results/final_branch_combined
+results/final_comprehensive_20260927_182908.zip
+/results/previous_team_recheck
+/results/previous_team_recheck_full
+/results/speed_check
+/results/submission_smoke
